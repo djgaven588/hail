@@ -4,7 +4,7 @@ mod scanner;
 use std::collections::HashMap;
 
 use crate::{
-    parser::{Expr, Parser, Stmt},
+    parser::{Expr, Parser, Stmt, VariableMutability},
     scanner::{Scanner, Token, TokenType},
 };
 
@@ -68,6 +68,9 @@ enum ExecutionErrorType {
     InvalidOperator(Dynamic, Token, Dynamic),
     InvalidUnaryOperator(Token, Dynamic),
     DivideByZero,
+    NoValue,
+    UnexpectedReturningStatement,
+    RedefinedConstant,
 }
 
 #[derive(Debug)]
@@ -87,13 +90,20 @@ impl ExecutionError {
 
 struct VariableState {
     value: Dynamic,
-    mutable: bool,
+    mutability: VariableMutability,
 }
 
 impl VariableState {
-    pub fn new(value: Dynamic, mutable: bool) -> VariableState {
-        VariableState { value, mutable }
+    pub fn new(value: Dynamic, mutability: VariableMutability) -> VariableState {
+        VariableState { value, mutability }
     }
+}
+
+#[derive(Debug)]
+enum StmtResult {
+    None,
+    Value(Dynamic),
+    Return(Dynamic),
 }
 
 #[derive(Default)]
@@ -118,58 +128,136 @@ impl ExecutionContext {
         }
     }
 
-    pub fn run(mut self, stmts: &[Stmt]) -> Result<Dynamic, ExecutionError> {
-        self.statements(stmts)
+    pub fn run(mut self, stmts: &[Stmt]) -> Result<Option<Dynamic>, ExecutionError> {
+        Ok(match self.statements(stmts)? {
+            StmtResult::None => None,
+            StmtResult::Value(dynamic) => Some(dynamic),
+            StmtResult::Return(dynamic) => Some(dynamic),
+        })
     }
 
-    pub fn statements(&mut self, stmts: &[Stmt]) -> Result<Dynamic, ExecutionError> {
+    pub fn statements(&mut self, stmts: &[Stmt]) -> Result<StmtResult, ExecutionError> {
         let mut last = None;
         for stmt in stmts {
-            last = None;
-            match stmt {
-                Stmt::Expression(expr) => {
-                    self.step(expr)?;
+            last = match self.statement(stmt)? {
+                StmtResult::None => None,
+                StmtResult::Value(dynamic) => Some(dynamic),
+                StmtResult::Return(dynamic) => {
+                    return Ok(StmtResult::Return(dynamic));
                 }
-                Stmt::Print(expr) => {
-                    println!("Print: {:?}", self.step(expr)?)
-                }
-                Stmt::Return(expr) => return self.step(expr),
-                Stmt::Variable(name, initializer, mutable) => {
-                    let value = if let Some(initializer) = initializer {
-                        self.step(initializer)?
-                    } else {
-                        Dynamic::Nil
-                    };
-                    self.scopes
-                        .last_mut()
-                        .expect("A scope should always exist.")
-                        .variables
-                        .insert(name.to_string(), VariableState::new(value, *mutable));
-                }
-                Stmt::Assign(name, assignment) => {
-                    self.assign(name, assignment).map(|_| Dynamic::Nil)?;
-                }
-                Stmt::Block(stmts) => {
-                    self.scopes.push(Scoped::default());
+            };
+        }
 
-                    last = Some(self.statements(stmts)?);
+        Ok(if let Some(last) = last {
+            StmtResult::Value(last)
+        } else {
+            StmtResult::None
+        })
+    }
 
-                    // Went out of scope
-                    let _ = self.scopes.pop();
+    fn statement(&mut self, stmt: &Stmt) -> Result<StmtResult, ExecutionError> {
+        let mut last = StmtResult::None;
+        match stmt {
+            Stmt::Expression(expr, can_return) => {
+                let result = self.expression(expr)?;
+                if *can_return {
+                    last = StmtResult::Value(result);
                 }
+            }
+            Stmt::Print(stmt) => {
+                println!("Print: {:?}", self.statement(stmt)?)
+            }
+            Stmt::Return(stmt) => {
+                // A
+                match self.statement(stmt)? {
+                    StmtResult::None => {
+                        return Err(ExecutionError::new(
+                            stmt.get_location(),
+                            ExecutionErrorType::NoValue,
+                        ));
+                    }
+                    StmtResult::Value(dynamic) => return Ok(StmtResult::Return(dynamic)),
+                    StmtResult::Return(dynamic) => return Ok(StmtResult::Return(dynamic)),
+                }
+            }
+            Stmt::Variable(name, initializer, mutability) => {
+                self.define_variable(name, initializer, *mutability)?;
+            }
+            Stmt::Assign(name, assignment) => {
+                self.assign(name, assignment).map(|_| Dynamic::Nil)?;
+            }
+            Stmt::Block(stmts) => {
+                self.scopes.push(Scoped::default());
+
+                last = self.statements(stmts)?;
+
+                // Went out of scope
+                let _ = self.scopes.pop();
+            }
+        };
+
+        Ok(last)
+    }
+
+    fn define_variable(
+        &mut self,
+        token: &Token,
+        initializer: &Option<Box<Stmt>>,
+        mutability: VariableMutability,
+    ) -> Result<(), ExecutionError> {
+        let value = if let Some(initializer) = initializer {
+            match self.statement(initializer)? {
+                StmtResult::None => {
+                    return Err(ExecutionError::new(
+                        initializer.get_location(),
+                        ExecutionErrorType::NoValue,
+                    ));
+                }
+                StmtResult::Value(dynamic) => dynamic,
+                StmtResult::Return(_) => {
+                    return Err(ExecutionError::new(
+                        initializer.get_location(),
+                        ExecutionErrorType::UnexpectedReturningStatement,
+                    ));
+                }
+            }
+        } else {
+            Dynamic::Nil
+        };
+
+        // If it's a constant, make sure we're not bypassing the fact it's a constant by redefining it
+        // Constants are still *scoped*, this is more of a "enforce good behavior" that can be removed if needed
+        let len = self.scopes.len();
+        for i in 0..len {
+            let i = len - i - 1;
+            if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme)
+                && found.mutability == VariableMutability::Constant
+            {
+                return Err(ExecutionError::new(
+                    token.location.clone(),
+                    ExecutionErrorType::RedefinedConstant,
+                ));
             }
         }
 
-        Ok(last.unwrap_or(Dynamic::Nil))
+        self.scopes
+            .last_mut()
+            .expect("A scope should always exist.")
+            .variables
+            .insert(
+                token.lexeme.to_string(),
+                VariableState::new(value, mutability),
+            );
+        Ok(())
     }
 
-    fn step(&mut self, expr: &Expr) -> Result<Dynamic, ExecutionError> {
-        println!("Expr: {expr:?}");
+    fn expression(&mut self, expr: &Expr) -> Result<Dynamic, ExecutionError> {
+        //println!("Expr: {expr:?}");
         match expr {
-            Expr::Bool(val) => Ok(Dynamic::Bool(*val)),
-            Expr::Float(val) => Ok(Dynamic::Float(*val)),
-            Expr::Integer(val) => Ok(Dynamic::Integer(*val)),
-            Expr::String(val) => Ok(Dynamic::String(val.clone())),
+            Expr::Bool(_, val) => Ok(Dynamic::Bool(*val)),
+            Expr::Float(_, val) => Ok(Dynamic::Float(*val)),
+            Expr::Integer(_, val) => Ok(Dynamic::Integer(*val)),
+            Expr::String(_, val) => Ok(Dynamic::String(val.clone())),
             Expr::Unary(token, expr) => self.unary(token, expr),
             Expr::Binary(expr, token, expr1) => self.binary(token, expr, expr1),
             Expr::Variable(identifier) => self.variable(identifier),
@@ -177,14 +265,28 @@ impl ExecutionContext {
         }
     }
 
-    fn assign(&mut self, token: &Token, expr: &Expr) -> Result<(), ExecutionError> {
-        let result = self.step(expr)?;
+    fn assign(&mut self, token: &Token, stmt: &Stmt) -> Result<(), ExecutionError> {
+        let result = match self.statement(stmt)? {
+            StmtResult::None => {
+                return Err(ExecutionError::new(
+                    stmt.get_location(),
+                    ExecutionErrorType::NoValue,
+                ));
+            }
+            StmtResult::Value(dynamic) => dynamic,
+            StmtResult::Return(_) => {
+                return Err(ExecutionError::new(
+                    stmt.get_location(),
+                    ExecutionErrorType::UnexpectedReturningStatement,
+                ));
+            }
+        };
 
         let len = self.scopes.len();
         for i in 0..len {
             let i = len - i - 1;
             if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme) {
-                if !found.mutable {
+                if found.mutability != VariableMutability::Mutable {
                     return Err(ExecutionError::new(
                         token.location.clone(),
                         ExecutionErrorType::VariableImmutable(token.lexeme.clone()),
@@ -222,8 +324,8 @@ impl ExecutionContext {
         expr: &Expr,
         expr1: &Expr,
     ) -> Result<Dynamic, ExecutionError> {
-        let left = self.step(expr)?;
-        let right = self.step(expr1)?;
+        let left = self.expression(expr)?;
+        let right = self.expression(expr1)?;
         Ok(match token.token_type {
             TokenType::Minus => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Integer(a - b),
@@ -334,7 +436,7 @@ impl ExecutionContext {
     }
 
     fn unary(&mut self, token: &Token, expr: &Expr) -> Result<Dynamic, ExecutionError> {
-        let left = self.step(expr)?;
+        let left = self.expression(expr)?;
         Ok(match token.token_type {
             TokenType::Minus => match left {
                 Dynamic::Integer(val) => Dynamic::Integer(-val),

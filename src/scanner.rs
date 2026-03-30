@@ -1,6 +1,6 @@
 use crate::Location;
 
-const KEYWORDS: [(&str, TokenType); 13] = [
+const KEYWORDS: [(&str, TokenType); 14] = [
     ("let", TokenType::Let),
     ("if", TokenType::If),
     ("else", TokenType::Else),
@@ -13,7 +13,8 @@ const KEYWORDS: [(&str, TokenType); 13] = [
     ("struct", TokenType::Struct),
     ("import", TokenType::Import),
     ("print", TokenType::Print),
-    ("mut", TokenType::Mutable),
+    ("mut", TokenType::Mut),
+    ("const", TokenType::Const),
 ];
 
 #[derive(Debug, Clone)]
@@ -75,7 +76,8 @@ pub enum TokenType {
     Struct,
     Import,
     Print,
-    Mutable,
+    Mut,
+    Const,
 
     // Special
     DocComment,

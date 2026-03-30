@@ -1,8 +1,45 @@
 
-// My Comment
-// // My Doc comment
-let mut my_var = 1.0;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Setup a mutable variable
+let mut my_var; // Nil without an initializer
 my_var = 2.0;
-let my_var = my_var * 2.0;
 print my_var;
-//(-1.1 + 2.0) / (2.0 * 2.0 + -1.0);
+
+// Lock this value down
+const my_var = my_var;
+
+// Scoped variables
+let second_var = {
+	// Execution error, redefined constant
+	let my_var = my_var + 1.0;
+	my_var
+};
+
+print second_var + my_var;
+
+// Execution error, not mutable
+second_var = 2.0;

@@ -1,4 +1,7 @@
-use crate::scanner::{Token, TokenType};
+use crate::{
+    Location,
+    scanner::{Token, TokenType},
+};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -80,6 +83,8 @@ impl Parser {
     fn declaration(&mut self) -> Option<Stmt> {
         let stmt = if self.try_match(&[TokenType::Let]).is_some() {
             self.var_declaration()
+        } else if self.try_match(&[TokenType::Const]).is_some() {
+            self.const_declaration()
         } else if self
             .peek_next()
             .is_some_and(|v| v.token_type == TokenType::Equal)
@@ -99,8 +104,29 @@ impl Parser {
         stmt
     }
 
+    fn const_declaration(&mut self) -> Option<Stmt> {
+        let Some(name) = self.try_match(&[TokenType::Identifier]).cloned() else {
+            self.error(ParseErrorType::ExpectedIdentifier);
+            return None;
+        };
+
+        self.consume(TokenType::Equal, ParseErrorType::ExpectedExpression);
+
+        let Some(initializer) = self.statement() else {
+            return None;
+        };
+
+        self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
+
+        Some(Stmt::Variable(
+            name,
+            Some(Box::new(initializer)),
+            VariableMutability::Constant,
+        ))
+    }
+
     fn var_declaration(&mut self) -> Option<Stmt> {
-        let mutable = self.try_match(&[TokenType::Mutable]).is_some();
+        let mutable = self.try_match(&[TokenType::Mut]).is_some();
 
         let Some(name) = self.try_match(&[TokenType::Identifier]).cloned() else {
             self.error(ParseErrorType::ExpectedIdentifier);
@@ -108,7 +134,7 @@ impl Parser {
         };
 
         let initializer = if self.try_match(&[TokenType::Equal]).is_some() {
-            if let Some(expr) = self.parse_precendence(Precedence::Assignment) {
+            if let Some(expr) = self.statement() {
                 Some(Box::new(expr))
             } else {
                 return None;
@@ -116,9 +142,18 @@ impl Parser {
         } else {
             None
         };
+
         self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
 
-        Some(Stmt::Variable(name.lexeme, initializer, mutable))
+        Some(Stmt::Variable(
+            name,
+            initializer,
+            if mutable {
+                VariableMutability::Mutable
+            } else {
+                VariableMutability::Immutable
+            },
+        ))
     }
 
     fn var_assignment(&mut self) -> Option<Stmt> {
@@ -128,7 +163,7 @@ impl Parser {
         };
 
         let assignment = if self.try_match(&[TokenType::Equal]).is_some() {
-            if let Some(expr) = self.parse_precendence(Precedence::Assignment) {
+            if let Some(expr) = self.statement() {
                 Box::new(expr)
             } else {
                 return None;
@@ -137,6 +172,7 @@ impl Parser {
             self.error(ParseErrorType::ExpectedExpression);
             return None;
         };
+
         self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
 
         Some(Stmt::Assign(token, assignment))
@@ -164,11 +200,20 @@ impl Parser {
             }
         }
 
+        if stmts.is_empty() {
+            // Default fill statement with nil return value
+            // Other things expect at least 1 statement, returning nil by default seems sane.
+            stmts.push(Stmt::Expression(
+                Box::new(Expr::Nil(self.last().unwrap().location.clone())),
+                true,
+            ));
+        }
+
         Some(Stmt::Block(stmts))
     }
 
     fn return_statement(&mut self) -> Option<Stmt> {
-        let expr = if let Some(expr) = self.parse_precendence(Precedence::Or) {
+        let expr = if let Some(expr) = self.statement() {
             Box::new(expr)
         } else {
             self.error(ParseErrorType::ExpectedExpression);
@@ -188,22 +233,19 @@ impl Parser {
             return None;
         };
 
-        let stmt = if self.try_match(&[TokenType::Semicolon]).is_some() {
-            Stmt::Expression(expr)
-        } else {
-            Stmt::Return(expr)
-        };
-
-        Some(stmt)
+        Some(Stmt::Expression(
+            expr, true, //self.try_match(&[TokenType::Semicolon]).is_none(),
+        ))
     }
 
     fn print_statement(&mut self) -> Option<Stmt> {
-        let expr = if let Some(expr) = self.parse_precendence(Precedence::Or) {
+        let expr = if let Some(expr) = self.statement() {
             Box::new(expr)
         } else {
             self.error(ParseErrorType::ExpectedExpression);
             return None;
         };
+
         self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
 
         Some(Stmt::Print(expr))
@@ -331,6 +373,7 @@ impl Parser {
         let token = self.last()?;
         match token.token_type {
             TokenType::Integer => Some(Expr::Integer(
+                token.location.clone(),
                 token
                     .lexeme
                     .parse()
@@ -345,6 +388,7 @@ impl Parser {
         let token = self.last()?;
         match token.token_type {
             TokenType::Float => Some(Expr::Float(
+                token.location.clone(),
                 token
                     .lexeme
                     .parse()
@@ -358,8 +402,8 @@ impl Parser {
         println!("Bool");
         let token = self.last()?;
         match token.token_type {
-            TokenType::True => Some(Expr::Bool(true)),
-            TokenType::False => Some(Expr::Bool(false)),
+            TokenType::True => Some(Expr::Bool(token.location.clone(), true)),
+            TokenType::False => Some(Expr::Bool(token.location.clone(), false)),
             a => unreachable!("{a:?}"),
         }
     }
@@ -368,6 +412,7 @@ impl Parser {
         let token = self.last()?;
         match token.token_type {
             TokenType::String => Some(Expr::String(
+                token.location.clone(),
                 token.lexeme[1..(token.lexeme.len() - 1)].to_string(),
             )),
             a => unreachable!("{a:?}"),
@@ -471,38 +516,78 @@ enum Precedence {
     Primary = 100,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableMutability {
+    Immutable,
+    Mutable,
+    Constant,
+}
+
 #[derive(Debug)]
 pub enum Stmt {
     // Name, initializer, mutable
-    Variable(String, Option<Box<Expr>>, bool),
-    Expression(Box<Expr>),
-    Print(Box<Expr>),
-    Return(Box<Expr>),
+    Variable(Token, Option<Box<Stmt>>, VariableMutability),
+    // Evaluate, can return
+    Expression(Box<Expr>, bool),
+    Print(Box<Stmt>),
+    Return(Box<Stmt>),
     // Name, assignment
-    Assign(Token, Box<Expr>),
+    Assign(Token, Box<Stmt>),
     Block(Vec<Stmt>),
+}
+
+impl Stmt {
+    pub fn get_location(&self) -> Location {
+        match self {
+            Stmt::Variable(token, _, _) => token.location.clone(),
+            Stmt::Expression(expr, _) => expr.get_location(),
+            Stmt::Print(stmt) => stmt.get_location(),
+            Stmt::Return(stmt) => stmt.get_location(),
+            Stmt::Assign(token, _) => token.location.clone(),
+            Stmt::Block(stmts) => stmts
+                .last()
+                .expect("Block should always have at least 1 statement.")
+                .get_location(),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum Expr {
-    Float(f64),
-    Integer(i64),
-    Bool(bool),
-    String(String),
-    Nil,
+    Float(Location, f64),
+    Integer(Location, i64),
+    Bool(Location, bool),
+    String(Location, String),
+    Nil(Location),
     Unary(Token, Box<Expr>),
     Binary(Box<Expr>, Token, Box<Expr>),
     Variable(Token),
 }
 
 impl Expr {
+    pub fn get_location(&self) -> Location {
+        match self {
+            Expr::Float(location, _) => location,
+            Expr::Integer(location, _) => location,
+            Expr::Bool(location, _) => location,
+            Expr::String(location, _) => location,
+            Expr::Nil(location) => location,
+            Expr::Unary(token, _) => &token.location,
+            Expr::Binary(_, token, _) => &token.location,
+            Expr::Variable(token) => &token.location,
+        }
+        .clone()
+    }
+}
+
+impl Expr {
     pub fn display(&self, level: usize) -> String {
         match self {
-            Expr::Float(token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::Integer(token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::Bool(token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::String(token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::Nil => "\t".repeat(level) + "Nil\n",
+            Expr::Float(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
+            Expr::Integer(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
+            Expr::Bool(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
+            Expr::String(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
+            Expr::Nil(_) => "\t".repeat(level) + "Nil\n",
             Expr::Unary(token, expr) => {
                 "\t".repeat(level) + &format!("{:?}{}\n", token.token_type, expr.display(level + 1))
             }
@@ -556,7 +641,7 @@ impl TokenType {
                 (None, Some(Parser::binary), Precedence::Equality)
             }
             TokenType::Semicolon => (None, None, Precedence::None),
-            //TokenType::Equal => (Some(Parser::assign), None, Precedence::Assignment),
+            TokenType::RightBrace => (None, None, Precedence::None),
             _ => {
                 return Err(ParseErrorType::UnexpectedToken);
             }
