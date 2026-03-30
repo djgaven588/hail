@@ -1,6 +1,8 @@
 mod parser;
 mod scanner;
 
+use std::collections::HashMap;
+
 use crate::{
     parser::{Expr, Parser, Stmt},
     scanner::{Scanner, Token, TokenType},
@@ -29,14 +31,14 @@ pub fn run(source: String) {
 
     if let Some(stmts) = parser.get() {
         println!("Running...");
-        let result = Walker::default().run(stmts);
+        let result = ExecutionContext::new().run(stmts);
         println!("Result: {result:?}");
     } else {
         println!("Failed to get statements.");
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Dynamic {
     Bool(bool),
     Integer(i64),
@@ -60,27 +62,67 @@ impl PartialEq for Dynamic {
 impl Eq for Dynamic {}
 
 #[derive(Debug)]
+enum ExecutionErrorType {
+    VariableImmutable(String),
+    VariableUndefined(String),
+    InvalidOperator(Dynamic, Token, Dynamic),
+    InvalidUnaryOperator(Token, Dynamic),
+    DivideByZero,
+}
+
+#[derive(Debug)]
 struct ExecutionError {
     location: Location,
-    message: String,
+    error_type: ExecutionErrorType,
 }
 
 impl ExecutionError {
-    pub fn new(location: Location, message: &str) -> ExecutionError {
+    pub fn new(location: Location, error_type: ExecutionErrorType) -> ExecutionError {
         ExecutionError {
             location,
-            message: message.to_string(),
+            error_type,
         }
     }
 }
 
-#[derive(Default)]
-struct Walker {
-    //execution_errors: Vec<String>,
+struct VariableState {
+    value: Dynamic,
+    mutable: bool,
 }
 
-impl Walker {
-    pub fn run(&mut self, stmts: &[Stmt]) -> Result<Dynamic, ExecutionError> {
+impl VariableState {
+    pub fn new(value: Dynamic, mutable: bool) -> VariableState {
+        VariableState { value, mutable }
+    }
+}
+
+#[derive(Default)]
+struct Scoped {
+    variables: HashMap<String, VariableState>,
+}
+
+struct ExecutionContext {
+    scopes: Vec<Scoped>,
+}
+
+impl ExecutionContext {
+    pub fn new() -> ExecutionContext {
+        ExecutionContext {
+            scopes: vec![Scoped::default()],
+        }
+    }
+
+    pub fn new_with_scope(scope: Scoped) -> ExecutionContext {
+        ExecutionContext {
+            scopes: vec![scope],
+        }
+    }
+
+    pub fn run(mut self, stmts: &[Stmt]) -> Result<Dynamic, ExecutionError> {
+        self.statements(stmts)
+    }
+
+    pub fn statements(&mut self, stmts: &[Stmt]) -> Result<Dynamic, ExecutionError> {
         let mut last = None;
         for stmt in stmts {
             last = None;
@@ -92,6 +134,29 @@ impl Walker {
                     println!("Print: {:?}", self.step(expr)?)
                 }
                 Stmt::Return(expr) => return self.step(expr),
+                Stmt::Variable(name, initializer, mutable) => {
+                    let value = if let Some(initializer) = initializer {
+                        self.step(initializer)?
+                    } else {
+                        Dynamic::Nil
+                    };
+                    self.scopes
+                        .last_mut()
+                        .expect("A scope should always exist.")
+                        .variables
+                        .insert(name.to_string(), VariableState::new(value, *mutable));
+                }
+                Stmt::Assign(name, assignment) => {
+                    self.assign(name, assignment).map(|_| Dynamic::Nil)?;
+                }
+                Stmt::Block(stmts) => {
+                    self.scopes.push(Scoped::default());
+
+                    last = Some(self.statements(stmts)?);
+
+                    // Went out of scope
+                    let _ = self.scopes.pop();
+                }
             }
         }
 
@@ -99,7 +164,7 @@ impl Walker {
     }
 
     fn step(&mut self, expr: &Expr) -> Result<Dynamic, ExecutionError> {
-        //println!("Expr: {expr:?}");
+        println!("Expr: {expr:?}");
         match expr {
             Expr::Bool(val) => Ok(Dynamic::Bool(*val)),
             Expr::Float(val) => Ok(Dynamic::Float(*val)),
@@ -107,8 +172,48 @@ impl Walker {
             Expr::String(val) => Ok(Dynamic::String(val.clone())),
             Expr::Unary(token, expr) => self.unary(token, expr),
             Expr::Binary(expr, token, expr1) => self.binary(token, expr, expr1),
+            Expr::Variable(identifier) => self.variable(identifier),
             a => unimplemented!("{a:?}"),
         }
+    }
+
+    fn assign(&mut self, token: &Token, expr: &Expr) -> Result<(), ExecutionError> {
+        let result = self.step(expr)?;
+
+        let len = self.scopes.len();
+        for i in 0..len {
+            let i = len - i - 1;
+            if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme) {
+                if !found.mutable {
+                    return Err(ExecutionError::new(
+                        token.location.clone(),
+                        ExecutionErrorType::VariableImmutable(token.lexeme.clone()),
+                    ));
+                }
+                found.value = result;
+                return Ok(());
+            }
+        }
+
+        Err(ExecutionError::new(
+            token.location.clone(),
+            ExecutionErrorType::VariableUndefined(token.lexeme.clone()),
+        ))
+    }
+
+    fn variable(&mut self, token: &Token) -> Result<Dynamic, ExecutionError> {
+        let len = self.scopes.len();
+        for i in 0..len {
+            let i = len - i - 1;
+            if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme) {
+                return Ok(found.value.clone());
+            }
+        }
+
+        Err(ExecutionError::new(
+            token.location.clone(),
+            ExecutionErrorType::VariableUndefined(token.lexeme.clone()),
+        ))
     }
 
     fn binary(
@@ -126,9 +231,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -142,9 +245,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -154,9 +255,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -167,7 +266,7 @@ impl Walker {
                     } else {
                         return Err(ExecutionError::new(
                             token.location.clone(),
-                            "Divide by zero.",
+                            ExecutionErrorType::DivideByZero,
                         ));
                     }
                 }
@@ -177,16 +276,14 @@ impl Walker {
                     } else {
                         return Err(ExecutionError::new(
                             token.location.clone(),
-                            "Divide by zero.",
+                            ExecutionErrorType::DivideByZero,
                         ));
                     }
                 }
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -196,9 +293,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -208,9 +303,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -220,9 +313,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -232,9 +323,7 @@ impl Walker {
                 (a, b) => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!(
-                            "Value A ({a:?}) and B ({b:?}) have no binary operator for '{token:?}'"
-                        ),
+                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
                     ));
                 }
             },
@@ -253,7 +342,7 @@ impl Walker {
                 a => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!("Value A ({a:?}) has no unary operator for '{token:?}'"),
+                        ExecutionErrorType::InvalidUnaryOperator(token.clone(), a),
                     ));
                 }
             },
@@ -262,7 +351,7 @@ impl Walker {
                 a => {
                     return Err(ExecutionError::new(
                         token.location.clone(),
-                        &format!("Value A ({a:?}) has no unary operator for '{token:?}'"),
+                        ExecutionErrorType::InvalidUnaryOperator(token.clone(), a),
                     ));
                 }
             },
