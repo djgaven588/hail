@@ -1,0 +1,30 @@
+/*
+// My Comment
+/// My Doc comment
+/*
+AAAA/*
+*/
+
+*/
+truthy
+if_
+while_true
+
+"A 
+multiline
+string"
+fn is_true_true() {
+	true && true || !false
+}
+
+struct MyStruct {
+	a,
+	b
+}
+
+let hi = "Dork";
+let math = (9 + 10) / 2.;*/
+//2 + 2 / 2 * 2
+//-1 + 2 / 2 * 2 + -1
+//true && true
+(-1.1 + 2.0) / (2.0 * 2.0 + -1.0)
