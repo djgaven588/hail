@@ -1,4 +1,19 @@
-use crate::{KEYWORDS, Location};
+use crate::Location;
+
+const KEYWORDS: [(&str, TokenType); 12] = [
+    ("let", TokenType::Let),
+    ("if", TokenType::If),
+    ("else", TokenType::Else),
+    ("while", TokenType::While),
+    ("fn", TokenType::Fn),
+    ("return", TokenType::Return),
+    ("nil", TokenType::Nil),
+    ("true", TokenType::True),
+    ("false", TokenType::False),
+    ("struct", TokenType::Struct),
+    ("import", TokenType::Import),
+    ("print", TokenType::Print),
+];
 
 #[derive(Debug, Clone)]
 pub struct Token {
@@ -58,6 +73,7 @@ pub enum TokenType {
     False,
     Struct,
     Import,
+    Print,
 
     // Special
     DocComment,
