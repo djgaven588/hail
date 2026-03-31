@@ -71,6 +71,7 @@ enum ExecutionErrorType {
     NoValue,
     UnexpectedReturningStatement,
     RedefinedConstant,
+    ExpectedBoolean,
 }
 
 #[derive(Debug)]
@@ -99,7 +100,7 @@ impl VariableState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum StmtResult {
     None,
     Value(Dynamic),
@@ -194,6 +195,39 @@ impl ExecutionContext {
                 // Went out of scope
                 let _ = self.scopes.pop();
             }
+            Stmt::If(expr, body, otherwise) => {
+                // Get the expression's value to see which branch to take
+                let result = match self.statement(expr)? {
+                    StmtResult::None => {
+                        return Err(ExecutionError::new(
+                            expr.get_location(),
+                            ExecutionErrorType::ExpectedBoolean,
+                        ));
+                    }
+                    StmtResult::Value(dynamic) => dynamic,
+                    StmtResult::Return(_) => {
+                        return Err(ExecutionError::new(
+                            expr.get_location(),
+                            ExecutionErrorType::UnexpectedReturningStatement,
+                        ));
+                    }
+                };
+
+                // If it's not a bool, this is an error
+                // No "truthy" bullshit, it's true, false, or not a bool.
+                if !matches!(result, Dynamic::Bool(_)) {
+                    return Err(ExecutionError::new(
+                        expr.get_location(),
+                        ExecutionErrorType::ExpectedBoolean,
+                    ));
+                }
+
+                if result == Dynamic::Bool(true) {
+                    last = self.statement(body)?;
+                } else if let Some(otherwise) = otherwise {
+                    last = self.statement(otherwise)?;
+                }
+            }
         };
 
         Ok(last)
@@ -260,7 +294,9 @@ impl ExecutionContext {
             Expr::String(_, val) => Ok(Dynamic::String(val.clone())),
             Expr::Unary(token, expr) => self.unary(token, expr),
             Expr::Binary(expr, token, expr1) => self.binary(token, expr, expr1),
+            Expr::Condition(expr, token, expr1) => self.conditional(token, expr, expr1),
             Expr::Variable(identifier) => self.variable(identifier),
+            Expr::Nil(_) => Ok(Dynamic::Nil),
             a => unimplemented!("{a:?}"),
         }
     }
@@ -316,6 +352,50 @@ impl ExecutionContext {
             token.location.clone(),
             ExecutionErrorType::VariableUndefined(token.lexeme.clone()),
         ))
+    }
+
+    fn conditional(
+        &mut self,
+        token: &Token,
+        expr: &Expr,
+        expr1: &Expr,
+    ) -> Result<Dynamic, ExecutionError> {
+        let Dynamic::Bool(left) = self.expression(expr)? else {
+            return Err(ExecutionError::new(
+                expr.get_location(),
+                ExecutionErrorType::ExpectedBoolean,
+            ));
+        };
+
+        // A conditional "short circuits" it's expression if it's a known outcome
+        match token.token_type {
+            TokenType::And => {
+                if !left {
+                    return Ok(Dynamic::Bool(false));
+                }
+            }
+            TokenType::Or => {
+                if left {
+                    return Ok(Dynamic::Bool(true));
+                }
+            }
+            a => unimplemented!("{a:?}"),
+        }
+
+        // Evaluate right hand side
+        let Dynamic::Bool(right) = self.expression(expr1)? else {
+            return Err(ExecutionError::new(
+                expr1.get_location(),
+                ExecutionErrorType::ExpectedBoolean,
+            ));
+        };
+
+        // Return
+        Ok(Dynamic::Bool(match token.token_type {
+            TokenType::And => left && right,
+            TokenType::Or => left || right,
+            a => unimplemented!("{a:?}"),
+        }))
     }
 
     fn binary(

@@ -30,7 +30,7 @@ my_var = 2.0;
 print my_var;
 
 // Lock this value down
-const my_var = my_var;
+//const my_var = my_var;
 
 // Scoped variables
 let second_var = {
@@ -39,7 +39,20 @@ let second_var = {
 	my_var
 };
 
+let result = if second_var < 2.0 && true {
+	print "Greater!";
+	true
+} else {
+	print "Lesser :(";
+	false
+};
+
+print result;
+
 print second_var + my_var;
 
+let third_var = {};
+print third_var;
+
 // Execution error, not mutable
-second_var = 2.0;
+//second_var = 2.0;

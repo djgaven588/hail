@@ -24,6 +24,8 @@ enum ParseErrorType {
     MissingSemicolon,
     StatementInvalid,
     ExpectedIdentifier,
+    ExpectedBlock,
+    ExpectedCondition,
 }
 
 #[derive(Debug)]
@@ -179,8 +181,10 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Option<Stmt> {
-        if self.try_match(&[TokenType::LeftBrace]).is_some() {
-            self.block()
+        if self.try_match(&[TokenType::If]).is_some() {
+            self.if_statement()
+        } else if self.try_match(&[TokenType::LeftBrace]).is_some() {
+            self.block_statement()
         } else if self.try_match(&[TokenType::Print]).is_some() {
             self.print_statement()
         } else if self.try_match(&[TokenType::Return]).is_some() {
@@ -190,7 +194,23 @@ impl Parser {
         }
     }
 
-    fn block(&mut self) -> Option<Stmt> {
+    fn if_statement(&mut self) -> Option<Stmt> {
+        let condition = self.statement()?;
+
+        self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
+
+        let body = self.block_statement()?;
+        let else_block = if self.try_match(&[TokenType::Else]).is_some() {
+            self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
+            Some(self.block_statement()?.into())
+        } else {
+            None
+        };
+
+        Some(Stmt::If(Box::new(condition), Box::new(body), else_block))
+    }
+
+    fn block_statement(&mut self) -> Option<Stmt> {
         let mut stmts = vec![];
 
         while self.try_match(&[TokenType::RightBrace]).is_none() && !self.is_end() {
@@ -226,16 +246,18 @@ impl Parser {
     }
 
     fn expr_statement(&mut self) -> Option<Stmt> {
-        let expr = if let Some(expr) = self.parse_precendence(Precedence::Or) {
-            Box::new(expr)
+        let expr = self.expression()?.into();
+
+        Some(Stmt::Expression(expr, true))
+    }
+
+    fn expression(&mut self) -> Option<Expr> {
+        if let Some(expr) = self.parse_precendence(Precedence::WeirdInbetween) {
+            Some(expr)
         } else {
             self.error(ParseErrorType::ExpectedExpression);
-            return None;
-        };
-
-        Some(Stmt::Expression(
-            expr, true, //self.try_match(&[TokenType::Semicolon]).is_none(),
-        ))
+            None
+        }
     }
 
     fn print_statement(&mut self) -> Option<Stmt> {
@@ -280,8 +302,8 @@ impl Parser {
             prefix(self)?
         } else {
             self.error(ParseErrorType::UnexpectedToken);
-            let _ = self.advance();
-            println!("No rule");
+            let a = self.advance();
+            println!("No rule {a:?}");
             return None;
         };
 
@@ -325,7 +347,7 @@ impl Parser {
 
     fn grouping(&mut self) -> Option<Expr> {
         println!("Grouping");
-        let expr = self.parse_precendence(Precedence::Or)?;
+        let expr = self.parse_precendence(Precedence::WeirdInbetween)?;
 
         self.consume(
             TokenType::RightParenthese,
@@ -333,6 +355,29 @@ impl Parser {
         );
 
         Some(expr)
+    }
+
+    fn logical(&mut self, left: Expr) -> Option<Expr> {
+        println!("Logical");
+        let token = self.last()?.clone();
+        let precedence = match token.token_type.rule() {
+            Ok(val) => val.2,
+            Err(err) => {
+                self.error(err);
+                let _ = self.advance();
+                return None;
+            }
+        };
+        let Some(right) = self.parse_precendence(precedence) else {
+            self.error(ParseErrorType::ExpectedCondition);
+            return None;
+        };
+
+        Some(Expr::Condition(
+            Box::new(left),
+            token.clone(),
+            Box::new(right),
+        ))
     }
 
     fn binary(&mut self, left: Expr) -> Option<Expr> {
@@ -357,7 +402,7 @@ impl Parser {
     fn unary(&mut self) -> Option<Expr> {
         println!("Unary");
         let token = self.last()?.clone();
-        let Some(left) = self.parse_precendence(Precedence::Call) else {
+        let Some(left) = self.parse_precendence(Precedence::Unary) else {
             self.error(ParseErrorType::ExpectedExpression);
             return None;
         };
@@ -505,6 +550,7 @@ impl Parser {
 enum Precedence {
     None = 0,
     Assignment = 10,
+    WeirdInbetween = 15,
     Or = 20,
     And = 30,
     Equality = 40,
@@ -534,6 +580,7 @@ pub enum Stmt {
     // Name, assignment
     Assign(Token, Box<Stmt>),
     Block(Vec<Stmt>),
+    If(Box<Stmt>, Box<Stmt>, Option<Box<Stmt>>),
 }
 
 impl Stmt {
@@ -548,6 +595,7 @@ impl Stmt {
                 .last()
                 .expect("Block should always have at least 1 statement.")
                 .get_location(),
+            Stmt::If(expr, _, _) => expr.get_location(),
         }
     }
 }
@@ -562,6 +610,7 @@ pub enum Expr {
     Unary(Token, Box<Expr>),
     Binary(Box<Expr>, Token, Box<Expr>),
     Variable(Token),
+    Condition(Box<Expr>, Token, Box<Expr>),
 }
 
 impl Expr {
@@ -575,6 +624,7 @@ impl Expr {
             Expr::Unary(token, _) => &token.location,
             Expr::Binary(_, token, _) => &token.location,
             Expr::Variable(token) => &token.location,
+            Expr::Condition(_, token, _) => &token.location,
         }
         .clone()
     }
@@ -592,6 +642,11 @@ impl Expr {
                 "\t".repeat(level) + &format!("{:?}{}\n", token.token_type, expr.display(level + 1))
             }
             Expr::Binary(expr, token, expr1) => {
+                expr.display(level + 1)
+                    + &"\t".repeat(level)
+                    + &format!("{:?}\n{}", token.token_type, expr1.display(level + 1))
+            }
+            Expr::Condition(expr, token, expr1) => {
                 expr.display(level + 1)
                     + &"\t".repeat(level)
                     + &format!("{:?}\n{}", token.token_type, expr1.display(level + 1))
@@ -618,8 +673,8 @@ impl TokenType {
         &self,
     ) -> Result<(Option<PrefixParseFunc>, Option<InfixParseFunc>, Precedence), ParseErrorType> {
         Ok(match self {
-            TokenType::Or => (None, Some(Parser::binary), Precedence::Or),
-            TokenType::And => (None, Some(Parser::binary), Precedence::And),
+            TokenType::Or => (None, Some(Parser::logical), Precedence::Or),
+            TokenType::And => (None, Some(Parser::logical), Precedence::And),
             TokenType::Minus => (Some(Parser::unary), Some(Parser::binary), Precedence::Term),
             TokenType::Bang => (Some(Parser::unary), None, Precedence::Term),
             TokenType::Plus => (None, Some(Parser::binary), Precedence::Term),
@@ -641,6 +696,7 @@ impl TokenType {
                 (None, Some(Parser::binary), Precedence::Equality)
             }
             TokenType::Semicolon => (None, None, Precedence::None),
+            TokenType::LeftBrace => (None, None, Precedence::None),
             TokenType::RightBrace => (None, None, Precedence::None),
             _ => {
                 return Err(ParseErrorType::UnexpectedToken);
