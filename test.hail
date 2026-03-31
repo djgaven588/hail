@@ -39,6 +39,17 @@ let second_var = {
 	my_var
 };
 
+let mut i = 0;
+while i < 10 {
+	print i;
+
+	i = i + 1;
+}
+
+for (let mut i = 0; i < 5; i = i + 1;) {
+	print i;
+}
+
 let result = if second_var < 2.0 && true {
 	print "Greater!";
 	true

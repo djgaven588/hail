@@ -1,10 +1,12 @@
 use crate::Location;
 
-const KEYWORDS: [(&str, TokenType); 14] = [
+const KEYWORDS: [(&str, TokenType); 16] = [
     ("let", TokenType::Let),
     ("if", TokenType::If),
     ("else", TokenType::Else),
     ("while", TokenType::While),
+    ("for", TokenType::For),
+    ("loop", TokenType::Loop),
     ("fn", TokenType::Fn),
     ("return", TokenType::Return),
     ("nil", TokenType::Nil),
@@ -67,6 +69,8 @@ pub enum TokenType {
     If,
     Else,
     While,
+    Loop,
+    For,
     Fn,
     Return,
     Let,

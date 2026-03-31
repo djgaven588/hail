@@ -228,6 +228,39 @@ impl ExecutionContext {
                     last = self.statement(otherwise)?;
                 }
             }
+            Stmt::While(condition, body) => {
+                while {
+                    // Get the expression's value to see which branch to take
+                    let result = match self.statement(condition)? {
+                        StmtResult::None => {
+                            return Err(ExecutionError::new(
+                                condition.get_location(),
+                                ExecutionErrorType::ExpectedBoolean,
+                            ));
+                        }
+                        StmtResult::Value(dynamic) => dynamic,
+                        StmtResult::Return(_) => {
+                            return Err(ExecutionError::new(
+                                condition.get_location(),
+                                ExecutionErrorType::UnexpectedReturningStatement,
+                            ));
+                        }
+                    };
+
+                    // If it's not a bool, this is an error
+                    // No "truthy" bullshit, it's true, false, or not a bool.
+                    if !matches!(result, Dynamic::Bool(_)) {
+                        return Err(ExecutionError::new(
+                            condition.get_location(),
+                            ExecutionErrorType::ExpectedBoolean,
+                        ));
+                    }
+
+                    result == Dynamic::Bool(true)
+                } {
+                    last = self.statement(body)?;
+                }
+            }
         };
 
         Ok(last)

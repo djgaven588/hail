@@ -26,6 +26,7 @@ enum ParseErrorType {
     ExpectedIdentifier,
     ExpectedBlock,
     ExpectedCondition,
+    ExpectedForBody,
 }
 
 #[derive(Debug)]
@@ -181,7 +182,11 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Option<Stmt> {
-        if self.try_match(&[TokenType::If]).is_some() {
+        if self.try_match(&[TokenType::For]).is_some() {
+            self.for_statement()
+        } else if self.try_match(&[TokenType::While]).is_some() {
+            self.while_statement()
+        } else if self.try_match(&[TokenType::If]).is_some() {
             self.if_statement()
         } else if self.try_match(&[TokenType::LeftBrace]).is_some() {
             self.block_statement()
@@ -192,6 +197,52 @@ impl Parser {
         } else {
             self.expr_statement()
         }
+    }
+
+    fn for_statement(&mut self) -> Option<Stmt> {
+        // (initializer; condition; chaser) { body }
+        self.consume(TokenType::LeftParenthese, ParseErrorType::ExpectedForBody);
+
+        let initializer = self.declaration()?;
+
+        let condition = self.declaration()?;
+
+        self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
+
+        let chaser = self.declaration()?;
+
+        self.consume(
+            TokenType::RightParenthese,
+            ParseErrorType::ExpectedClosingParenthese,
+        );
+
+        self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
+
+        let body = self.block_statement()?;
+
+        Some(Stmt::Block(vec![
+            // Preamble
+            initializer,
+            Stmt::While(
+                Box::new(condition),
+                Box::new(Stmt::Block(vec![
+                    // Encapsulated Body
+                    Stmt::Block(vec![body]),
+                    // ^ Prevents redeclaration within body impacting loop
+                    chaser,
+                ])),
+            ),
+        ]))
+    }
+
+    fn while_statement(&mut self) -> Option<Stmt> {
+        let condition = self.statement()?;
+
+        self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
+
+        let body = self.block_statement()?;
+
+        Some(Stmt::While(Box::new(condition), Box::new(body)))
     }
 
     fn if_statement(&mut self) -> Option<Stmt> {
@@ -252,7 +303,7 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Option<Expr> {
-        if let Some(expr) = self.parse_precendence(Precedence::WeirdInbetween) {
+        if let Some(expr) = self.parse_precendence(Precedence::Assignment) {
             Some(expr)
         } else {
             self.error(ParseErrorType::ExpectedExpression);
@@ -347,7 +398,7 @@ impl Parser {
 
     fn grouping(&mut self) -> Option<Expr> {
         println!("Grouping");
-        let expr = self.parse_precendence(Precedence::WeirdInbetween)?;
+        let expr = self.parse_precendence(Precedence::Assignment)?;
 
         self.consume(
             TokenType::RightParenthese,
@@ -550,7 +601,6 @@ impl Parser {
 enum Precedence {
     None = 0,
     Assignment = 10,
-    WeirdInbetween = 15,
     Or = 20,
     And = 30,
     Equality = 40,
@@ -580,7 +630,10 @@ pub enum Stmt {
     // Name, assignment
     Assign(Token, Box<Stmt>),
     Block(Vec<Stmt>),
+    // Condition, body, otherwise
     If(Box<Stmt>, Box<Stmt>, Option<Box<Stmt>>),
+    // Condition, body
+    While(Box<Stmt>, Box<Stmt>),
 }
 
 impl Stmt {
@@ -596,6 +649,7 @@ impl Stmt {
                 .expect("Block should always have at least 1 statement.")
                 .get_location(),
             Stmt::If(expr, _, _) => expr.get_location(),
+            Stmt::While(stmt, _) => stmt.get_location(),
         }
     }
 }
