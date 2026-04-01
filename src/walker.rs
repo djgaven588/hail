@@ -1,72 +1,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    Location,
+    Dynamic, ExecutionError, ExecutionErrorType, Location, Scope, Scoper,
     parser::{Expr, Parser, Stmt, VariableMutability},
     scanner::{Scanner, Token, TokenType},
 };
-
-#[derive(Debug, Clone)]
-pub enum Dynamic {
-    Bool(bool),
-    Integer(i64),
-    Float(f64),
-    String(String),
-    Nil,
-}
-
-impl PartialEq for Dynamic {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
-            (Self::Integer(l0), Self::Integer(r0)) => l0 == r0,
-            (Self::Float(l0), Self::Float(r0)) => l0 == r0,
-            (Self::String(l0), Self::String(r0)) => l0 == r0,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for Dynamic {}
-
-#[derive(Debug)]
-enum ExecutionErrorType {
-    VariableImmutable(String),
-    VariableUndefined(String),
-    InvalidOperator(Dynamic, Token, Dynamic),
-    InvalidUnaryOperator(Token, Dynamic),
-    DivideByZero,
-    NoValue,
-    UnexpectedReturningStatement,
-    RedefinedConstant,
-    ExpectedBoolean,
-}
-
-#[derive(Debug)]
-pub struct ExecutionError {
-    location: Location,
-    error_type: ExecutionErrorType,
-}
-
-impl ExecutionError {
-    pub fn new(location: Location, error_type: ExecutionErrorType) -> ExecutionError {
-        ExecutionError {
-            location,
-            error_type,
-        }
-    }
-}
-
-struct VariableState {
-    value: Dynamic,
-    mutability: VariableMutability,
-}
-
-impl VariableState {
-    pub fn new(value: Dynamic, mutability: VariableMutability) -> VariableState {
-        VariableState { value, mutability }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtResult {
@@ -75,25 +13,20 @@ pub enum StmtResult {
     Return(Dynamic),
 }
 
-#[derive(Default)]
-pub struct Scoped {
-    variables: HashMap<String, VariableState>,
-}
-
 pub struct ExecutionContext {
-    scopes: Vec<Scoped>,
+    scoper: Scoper,
 }
 
 impl ExecutionContext {
     pub fn new() -> ExecutionContext {
         ExecutionContext {
-            scopes: vec![Scoped::default()],
+            scoper: Scoper::new(None),
         }
     }
 
-    pub fn new_with_scope(scope: Scoped) -> ExecutionContext {
+    pub fn new_with_scope(scope: Scope) -> ExecutionContext {
         ExecutionContext {
-            scopes: vec![scope],
+            scoper: Scoper::new(Some(scope)),
         }
     }
 
@@ -105,7 +38,7 @@ impl ExecutionContext {
         })
     }
 
-    pub fn statements(&mut self, stmts: &[Stmt]) -> Result<StmtResult, ExecutionError> {
+    fn statements(&mut self, stmts: &[Stmt]) -> Result<StmtResult, ExecutionError> {
         let mut last = None;
         for stmt in stmts {
             last = match self.statement(stmt)? {
@@ -156,12 +89,12 @@ impl ExecutionContext {
                 self.assign(name, assignment).map(|_| Dynamic::Nil)?;
             }
             Stmt::Block(stmts) => {
-                self.scopes.push(Scoped::default());
+                self.scoper.push(None);
 
                 last = self.statements(stmts)?;
 
                 // Went out of scope
-                let _ = self.scopes.pop();
+                self.scoper.pop();
             }
             Stmt::If(expr, body, otherwise) => {
                 // Get the expression's value to see which branch to take
@@ -260,29 +193,9 @@ impl ExecutionContext {
             Dynamic::Nil
         };
 
-        // If it's a constant, make sure we're not bypassing the fact it's a constant by redefining it
-        // Constants are still *scoped*, this is more of a "enforce good behavior" that can be removed if needed
-        let len = self.scopes.len();
-        for i in 0..len {
-            let i = len - i - 1;
-            if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme)
-                && found.mutability == VariableMutability::Constant
-            {
-                return Err(ExecutionError::new(
-                    token.location.clone(),
-                    ExecutionErrorType::RedefinedConstant,
-                ));
-            }
-        }
+        self.scoper
+            .define_variable(&token.lexeme, mutability, value, &token.location)?;
 
-        self.scopes
-            .last_mut()
-            .expect("A scope should always exist.")
-            .variables
-            .insert(
-                token.lexeme.to_string(),
-                VariableState::new(value, mutability),
-            );
         Ok(())
     }
 
@@ -319,40 +232,12 @@ impl ExecutionContext {
             }
         };
 
-        let len = self.scopes.len();
-        for i in 0..len {
-            let i = len - i - 1;
-            if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme) {
-                if found.mutability != VariableMutability::Mutable {
-                    return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::VariableImmutable(token.lexeme.clone()),
-                    ));
-                }
-                found.value = result;
-                return Ok(());
-            }
-        }
-
-        Err(ExecutionError::new(
-            token.location.clone(),
-            ExecutionErrorType::VariableUndefined(token.lexeme.clone()),
-        ))
+        self.scoper
+            .assign_variable(&token.lexeme, result, &token.location)
     }
 
     fn variable(&mut self, token: &Token) -> Result<Dynamic, ExecutionError> {
-        let len = self.scopes.len();
-        for i in 0..len {
-            let i = len - i - 1;
-            if let Some(found) = self.scopes[i].variables.get_mut(&token.lexeme) {
-                return Ok(found.value.clone());
-            }
-        }
-
-        Err(ExecutionError::new(
-            token.location.clone(),
-            ExecutionErrorType::VariableUndefined(token.lexeme.clone()),
-        ))
+        self.scoper.get_variable(&token.lexeme, &token.location)
     }
 
     fn conditional(
@@ -421,9 +306,15 @@ impl ExecutionContext {
             TokenType::Plus => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Integer(a + b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Float(a + b),
-                (Dynamic::String(a), Dynamic::Integer(b)) => Dynamic::String(a + &b.to_string()),
-                (Dynamic::String(a), Dynamic::Float(b)) => Dynamic::String(a + &b.to_string()),
-                (Dynamic::String(a), Dynamic::Bool(b)) => Dynamic::String(a + &b.to_string()),
+                (Dynamic::String(a), Dynamic::Integer(b)) => {
+                    Dynamic::String(a + b.to_string().as_str())
+                }
+                (Dynamic::String(a), Dynamic::Float(b)) => {
+                    Dynamic::String(a + b.to_string().as_str())
+                }
+                (Dynamic::String(a), Dynamic::Bool(b)) => {
+                    Dynamic::String(a + b.to_string().as_str())
+                }
                 (Dynamic::String(a), Dynamic::String(b)) => Dynamic::String(a + b.as_str()),
                 (a, b) => {
                     return Err(ExecutionError::new(

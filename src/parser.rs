@@ -35,7 +35,7 @@ pub struct Parser {
     statements: Vec<Stmt>,
     parse_errors: Vec<ParseError>,
     current: usize,
-    panicing: bool,
+    panicking: bool,
 }
 
 impl Parser {
@@ -45,7 +45,7 @@ impl Parser {
             parse_errors: vec![],
             statements: vec![],
             current: 0,
-            panicing: false,
+            panicking: false,
         }
     }
 
@@ -98,10 +98,10 @@ impl Parser {
             self.statement()
         };
 
-        if self.panicing {
+        if self.panicking {
             // Get the parser into *any* state we can continue with.
             self.synchronize();
-            self.panicing = false;
+            self.panicking = false;
         }
 
         stmt
@@ -330,7 +330,7 @@ impl Parser {
 
     fn parse_precendence(&mut self, precedence: Precedence) -> Option<Expr> {
         if self.is_end() {
-            self.panicing = true;
+            self.panicking = true;
             self.parse_errors.push(ParseError::new(
                 self.peek().unwrap().clone(),
                 ParseErrorType::UnexpectedEndOfFile,
@@ -525,12 +525,12 @@ impl Parser {
     }
 
     fn error(&mut self, error: ParseErrorType) {
-        if self.panicing {
+        if self.panicking {
             // Prevent further errors from coming through while we're within the same panic
             return;
         }
 
-        self.panicing = true;
+        self.panicking = true;
         self.parse_errors.push(ParseError::new(
             self.peek()
                 .expect("Parse error shouldn't occur on missing token..?")
@@ -687,26 +687,32 @@ impl Expr {
 impl Expr {
     pub fn display(&self, level: usize) -> String {
         match self {
-            Expr::Float(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::Integer(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::Bool(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
-            Expr::String(_, token) => "\t".repeat(level) + &token.to_string() + "\n",
+            Expr::Float(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
+            Expr::Integer(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
+            Expr::Bool(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
+            Expr::String(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
             Expr::Nil(_) => "\t".repeat(level) + "Nil\n",
             Expr::Unary(token, expr) => {
-                "\t".repeat(level) + &format!("{:?}{}\n", token.token_type, expr.display(level + 1))
+                "\t".repeat(level)
+                    + format!(
+                        "{:?}{}\n",
+                        token.token_type,
+                        expr.display(level + 1).as_str()
+                    )
+                    .as_str()
             }
             Expr::Binary(expr, token, expr1) => {
                 expr.display(level + 1)
-                    + &"\t".repeat(level)
-                    + &format!("{:?}\n{}", token.token_type, expr1.display(level + 1))
+                    + "\t".repeat(level).as_str()
+                    + format!("{:?}\n{}", token.token_type, expr1.display(level + 1)).as_str()
             }
             Expr::Condition(expr, token, expr1) => {
                 expr.display(level + 1)
-                    + &"\t".repeat(level)
-                    + &format!("{:?}\n{}", token.token_type, expr1.display(level + 1))
+                    + "\t".repeat(level).as_str()
+                    + format!("{:?}\n{}", token.token_type, expr1.display(level + 1)).as_str()
             }
             Expr::Variable(identifier) => {
-                "\t".repeat(level) + "Variable: " + &identifier.lexeme.to_string() + "\n"
+                "\t".repeat(level) + "Variable: " + identifier.lexeme.to_string().as_str() + "\n"
             } /*
               Expr::Assign(identifier, value) => {
                   "\t".repeat(level)
