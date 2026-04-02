@@ -3,5 +3,5 @@ let mut x = 1000000;
 //print "Ready... Go!";
 
 while x > 0 {
-	x = x - 1;
+	x -= 1;
 }

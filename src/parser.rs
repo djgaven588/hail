@@ -19,6 +19,7 @@ impl ParseError {
 enum ParseErrorType {
     ExpectedClosingParenthese,
     ExpectedExpression,
+    InvalidOperator,
     UnexpectedEndOfFile,
     UnexpectedToken,
     MissingSemicolon,
@@ -27,6 +28,7 @@ enum ParseErrorType {
     ExpectedBlock,
     ExpectedCondition,
     ExpectedForBody,
+    ExpectedAssignmentOp,
 }
 
 #[derive(Debug)]
@@ -90,7 +92,7 @@ impl Parser {
             self.const_declaration()
         } else if self
             .peek_next()
-            .is_some_and(|v| v.token_type == TokenType::Equal)
+            .is_some_and(|v| v.token_type.is_assignment_op())
             && self.try_match(&[TokenType::Identifier]).is_some()
         {
             self.var_assignment()
@@ -140,6 +142,7 @@ impl Parser {
             if let Some(expr) = self.statement() {
                 Some(Box::new(expr))
             } else {
+                self.error(ParseErrorType::ExpectedAssignmentOp);
                 return None;
             }
         } else {
@@ -165,9 +168,12 @@ impl Parser {
             return None;
         };
 
-        let assignment = if self.try_match(&[TokenType::Equal]).is_some() {
+        // Try and match an assignment operation
+        // =, +=, ect.
+        let (op, assignment) = if let Some(op) = self.try_match(TokenType::assignment_ops()) {
+            let op = op.token_type.unwrap_assignment_op();
             if let Some(expr) = self.statement() {
-                Box::new(expr)
+                (op, Box::new(expr))
             } else {
                 return None;
             }
@@ -178,7 +184,7 @@ impl Parser {
 
         self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
 
-        Some(Stmt::Assign(token, assignment))
+        Some(Stmt::Assign(token.lexeme, op, assignment))
     }
 
     fn statement(&mut self) -> Option<Stmt> {
@@ -275,7 +281,7 @@ impl Parser {
             // Default fill statement with nil return value
             // Other things expect at least 1 statement, returning nil by default seems sane.
             stmts.push(Stmt::Expression(
-                Box::new(Expr::Nil(self.last().unwrap().location.clone())),
+                Box::new(Expr::Nil(self.last().unwrap().location)),
                 true,
             ));
         }
@@ -284,6 +290,10 @@ impl Parser {
     }
 
     fn return_statement(&mut self) -> Option<Stmt> {
+        if let Some(token) = self.try_match(&[TokenType::Semicolon]) {
+            return Some(Stmt::Return(token.location, None));
+        }
+
         let expr = if let Some(expr) = self.statement() {
             Box::new(expr)
         } else {
@@ -291,9 +301,9 @@ impl Parser {
             return None;
         };
 
-        self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
+        let token = self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon)?;
 
-        Some(Stmt::Return(expr))
+        Some(Stmt::Return(token.location, Some(expr)))
     }
 
     fn expr_statement(&mut self) -> Option<Stmt> {
@@ -338,8 +348,6 @@ impl Parser {
             return None;
         }
 
-        println!("Advancing precedence");
-
         let mut left = if let (Some(prefix), _, _) = match self.peek()?.token_type.rule() {
             Ok(val) => val,
             Err(err) => {
@@ -349,23 +357,17 @@ impl Parser {
             }
         } {
             let _ = self.advance();
-            println!("Rule");
             prefix(self)?
         } else {
             self.error(ParseErrorType::UnexpectedToken);
-            let a = self.advance();
-            println!("No rule {a:?}");
+            let _ = self.advance();
             return None;
         };
-
-        println!("Parse Expr: {left:?}");
 
         while !self.is_end() {
             let Some(next) = self.peek().cloned() else {
                 return None;
             };
-
-            println!("Checking");
 
             let (_, infix, token_precedence) = match next.token_type.rule() {
                 Ok(val) => val,
@@ -376,13 +378,9 @@ impl Parser {
                 }
             };
 
-            println!("Precedence: {token_precedence:?}, {precedence:?}");
-
             if token_precedence < precedence {
                 break;
             }
-
-            println!("Calling infix");
 
             let _ = self.advance();
             left = if let Some(infix) = infix {
@@ -397,7 +395,6 @@ impl Parser {
     }
 
     fn grouping(&mut self) -> Option<Expr> {
-        println!("Grouping");
         let expr = self.parse_precendence(Precedence::Assignment)?;
 
         self.consume(
@@ -409,7 +406,6 @@ impl Parser {
     }
 
     fn logical(&mut self, left: Expr) -> Option<Expr> {
-        println!("Logical");
         let token = self.last()?.clone();
         let precedence = match token.token_type.rule() {
             Ok(val) => val.2,
@@ -419,6 +415,7 @@ impl Parser {
                 return None;
             }
         };
+
         let Some(right) = self.parse_precendence(precedence) else {
             self.error(ParseErrorType::ExpectedCondition);
             return None;
@@ -432,7 +429,6 @@ impl Parser {
     }
 
     fn binary(&mut self, left: Expr) -> Option<Expr> {
-        println!("Binary");
         let token = self.last()?.clone();
         let precedence = match token.token_type.rule() {
             Ok(val) => val.2,
@@ -447,29 +443,56 @@ impl Parser {
             return None;
         };
 
-        Some(Expr::Binary(Box::new(left), token.clone(), Box::new(right)))
+        let op = match token.token_type {
+            TokenType::Minus => BinaryOp::Minus,
+            TokenType::Plus => BinaryOp::Plus,
+            TokenType::Slash => BinaryOp::Divide,
+            TokenType::Star => BinaryOp::Multiply,
+            TokenType::BangEqual => BinaryOp::BangEqual,
+            TokenType::EqualEqual => BinaryOp::EqualEqual,
+            TokenType::Greater => BinaryOp::Greater,
+            TokenType::GreaterEqual => BinaryOp::GreaterEqual,
+            TokenType::Less => BinaryOp::Less,
+            TokenType::LessEqual => BinaryOp::LessEqual,
+            TokenType::BinaryAnd => todo!(),
+            TokenType::BinaryOr => todo!(),
+            _ => {
+                self.error(ParseErrorType::InvalidOperator);
+                return None;
+            }
+        };
+
+        Some(Expr::Binary(Box::new(left), op, Box::new(right)))
     }
 
     fn unary(&mut self) -> Option<Expr> {
-        println!("Unary");
         let token = self.last()?.clone();
         let Some(left) = self.parse_precendence(Precedence::Unary) else {
             self.error(ParseErrorType::ExpectedExpression);
             return None;
         };
+
+        let op = match token.token_type {
+            TokenType::Minus => UnaryOp::Negate,
+            TokenType::Bang => UnaryOp::Invert,
+            _ => {
+                self.error(ParseErrorType::InvalidOperator);
+                return None;
+            }
+        };
+
         match token.token_type {
-            TokenType::Minus => Some(Expr::Unary(token.clone(), Box::new(left))),
-            TokenType::Bang => Some(Expr::Unary(token.clone(), Box::new(left))),
+            TokenType::Minus => Some(Expr::Unary(op, Box::new(left))),
+            TokenType::Bang => Some(Expr::Unary(op, Box::new(left))),
             a => unreachable!("{a:?}"),
         }
     }
 
     fn integer(&mut self) -> Option<Expr> {
-        println!("Integer");
         let token = self.last()?;
         match token.token_type {
             TokenType::Integer => Some(Expr::Integer(
-                token.location.clone(),
+                token.location,
                 token
                     .lexeme
                     .parse()
@@ -480,11 +503,10 @@ impl Parser {
     }
 
     fn float(&mut self) -> Option<Expr> {
-        println!("Float");
         let token = self.last()?;
         match token.token_type {
             TokenType::Float => Some(Expr::Float(
-                token.location.clone(),
+                token.location,
                 token
                     .lexeme
                     .parse()
@@ -495,20 +517,18 @@ impl Parser {
     }
 
     fn bool(&mut self) -> Option<Expr> {
-        println!("Bool");
         let token = self.last()?;
         match token.token_type {
-            TokenType::True => Some(Expr::Bool(token.location.clone(), true)),
-            TokenType::False => Some(Expr::Bool(token.location.clone(), false)),
+            TokenType::True => Some(Expr::Bool(token.location, true)),
+            TokenType::False => Some(Expr::Bool(token.location, false)),
             a => unreachable!("{a:?}"),
         }
     }
     fn string(&mut self) -> Option<Expr> {
-        println!("String");
         let token = self.last()?;
         match token.token_type {
             TokenType::String => Some(Expr::String(
-                token.location.clone(),
+                token.location,
                 token.lexeme[1..(token.lexeme.len() - 1)].to_string(),
             )),
             a => unreachable!("{a:?}"),
@@ -516,10 +536,9 @@ impl Parser {
     }
 
     fn variable(&mut self) -> Option<Expr> {
-        println!("Variable");
         let token = self.last()?;
         match token.token_type {
-            TokenType::Identifier => Some(Expr::Variable(token.clone())),
+            TokenType::Identifier => Some(Expr::Variable(token.location, token.lexeme.clone())),
             a => unreachable!("{a:?}"),
         }
     }
@@ -539,12 +558,12 @@ impl Parser {
         ));
     }
 
-    fn consume(&mut self, token_type: TokenType, error: ParseErrorType) -> bool {
-        if self.try_match(&[token_type]).is_some() {
-            true
+    fn consume(&mut self, token_type: TokenType, error: ParseErrorType) -> Option<Token> {
+        if let Some(token) = self.try_match(&[token_type]) {
+            Some(token.clone())
         } else {
             self.error(error);
-            false
+            None
         }
     }
 
@@ -619,6 +638,35 @@ pub enum VariableMutability {
     Constant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentOp {
+    Equal,
+    PlusEqual,
+    MinusEqual,
+    MultiplyEqual,
+    DivideEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Negate,
+    Invert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+    EqualEqual,
+    BangEqual,
+}
+
 #[derive(Debug)]
 pub enum Stmt {
     // Name, initializer, mutable
@@ -626,9 +674,9 @@ pub enum Stmt {
     // Evaluate, can return
     Expression(Box<Expr>, bool),
     Print(Box<Stmt>),
-    Return(Box<Stmt>),
+    Return(Location, Option<Box<Stmt>>),
     // Name, assignment
-    Assign(Token, Box<Stmt>),
+    Assign(String, AssignmentOp, Box<Stmt>),
     Block(Vec<Stmt>),
     // Condition, body, otherwise
     If(Box<Stmt>, Box<Stmt>, Option<Box<Stmt>>),
@@ -639,11 +687,11 @@ pub enum Stmt {
 impl Stmt {
     pub fn get_location(&self) -> Location {
         match self {
-            Stmt::Variable(token, _, _) => token.location.clone(),
+            Stmt::Variable(token, _, _) => token.location,
             Stmt::Expression(expr, _) => expr.get_location(),
             Stmt::Print(stmt) => stmt.get_location(),
-            Stmt::Return(stmt) => stmt.get_location(),
-            Stmt::Assign(token, _) => token.location.clone(),
+            Stmt::Return(location, _) => *location,
+            Stmt::Assign(_, _, stmt) => stmt.get_location(),
             Stmt::Block(stmts) => stmts
                 .last()
                 .expect("Block should always have at least 1 statement.")
@@ -661,26 +709,25 @@ pub enum Expr {
     Bool(Location, bool),
     String(Location, String),
     Nil(Location),
-    Unary(Token, Box<Expr>),
-    Binary(Box<Expr>, Token, Box<Expr>),
-    Variable(Token),
+    Unary(UnaryOp, Box<Expr>),
+    Binary(Box<Expr>, BinaryOp, Box<Expr>),
+    Variable(Location, String),
     Condition(Box<Expr>, Token, Box<Expr>),
 }
 
 impl Expr {
     pub fn get_location(&self) -> Location {
         match self {
-            Expr::Float(location, _) => location,
-            Expr::Integer(location, _) => location,
-            Expr::Bool(location, _) => location,
-            Expr::String(location, _) => location,
-            Expr::Nil(location) => location,
-            Expr::Unary(token, _) => &token.location,
-            Expr::Binary(_, token, _) => &token.location,
-            Expr::Variable(token) => &token.location,
-            Expr::Condition(_, token, _) => &token.location,
+            Expr::Float(location, _) => *location,
+            Expr::Integer(location, _) => *location,
+            Expr::Bool(location, _) => *location,
+            Expr::String(location, _) => *location,
+            Expr::Nil(location) => *location,
+            Expr::Unary(_, expr) => expr.get_location(),
+            Expr::Binary(expr, _, _) => expr.get_location(),
+            Expr::Variable(location, _) => *location,
+            Expr::Condition(_, token, _) => token.location,
         }
-        .clone()
     }
 }
 
@@ -692,27 +739,22 @@ impl Expr {
             Expr::Bool(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
             Expr::String(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
             Expr::Nil(_) => "\t".repeat(level) + "Nil\n",
-            Expr::Unary(token, expr) => {
+            Expr::Unary(op, expr) => {
                 "\t".repeat(level)
-                    + format!(
-                        "{:?}{}\n",
-                        token.token_type,
-                        expr.display(level + 1).as_str()
-                    )
-                    .as_str()
+                    + format!("{:?}{}\n", op, expr.display(level + 1).as_str()).as_str()
             }
-            Expr::Binary(expr, token, expr1) => {
+            Expr::Binary(expr, op, expr1) => {
                 expr.display(level + 1)
                     + "\t".repeat(level).as_str()
-                    + format!("{:?}\n{}", token.token_type, expr1.display(level + 1)).as_str()
+                    + format!("{:?}\n{}", op, expr1.display(level + 1)).as_str()
             }
             Expr::Condition(expr, token, expr1) => {
                 expr.display(level + 1)
                     + "\t".repeat(level).as_str()
                     + format!("{:?}\n{}", token.token_type, expr1.display(level + 1)).as_str()
             }
-            Expr::Variable(identifier) => {
-                "\t".repeat(level) + "Variable: " + identifier.lexeme.to_string().as_str() + "\n"
+            Expr::Variable(_, identifier) => {
+                "\t".repeat(level) + "Variable: " + identifier.as_str() + "\n"
             } /*
               Expr::Assign(identifier, value) => {
                   "\t".repeat(level)

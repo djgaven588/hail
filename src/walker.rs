@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use crate::{
     Dynamic, ExecutionError, ExecutionErrorType, Location, Scope, Scoper,
-    parser::{Expr, Parser, Stmt, VariableMutability},
-    scanner::{Scanner, Token, TokenType},
+    parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
+    scanner::{Token, TokenType},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,24 +67,28 @@ impl ExecutionContext {
             Stmt::Print(stmt) => {
                 println!("Print: {:?}", self.statement(stmt)?)
             }
-            Stmt::Return(stmt) => {
+            Stmt::Return(location, stmt) => {
                 // A
-                match self.statement(stmt)? {
-                    StmtResult::None => {
-                        return Err(ExecutionError::new(
-                            stmt.get_location(),
-                            ExecutionErrorType::NoValue,
-                        ));
+                return Ok(if let Some(stmt) = stmt {
+                    match self.statement(stmt)? {
+                        StmtResult::None => {
+                            return Err(ExecutionError::new(
+                                *location,
+                                ExecutionErrorType::NoValue,
+                            ));
+                        }
+                        StmtResult::Value(dynamic) => StmtResult::Return(dynamic),
+                        StmtResult::Return(dynamic) => StmtResult::Return(dynamic),
                     }
-                    StmtResult::Value(dynamic) => return Ok(StmtResult::Return(dynamic)),
-                    StmtResult::Return(dynamic) => return Ok(StmtResult::Return(dynamic)),
-                }
+                } else {
+                    StmtResult::Return(Dynamic::Nil)
+                });
             }
             Stmt::Variable(name, initializer, mutability) => {
                 self.define_variable(name, initializer, *mutability)?;
             }
-            Stmt::Assign(name, assignment) => {
-                self.assign(name, assignment).map(|_| Dynamic::Nil)?;
+            Stmt::Assign(name, op, assignment) => {
+                self.assign(name, *op, assignment).map(|_| Dynamic::Nil)?;
             }
             Stmt::Block(stmts) => {
                 self.scoper.push(None);
@@ -194,7 +196,7 @@ impl ExecutionContext {
         };
 
         self.scoper
-            .define_variable(&token.lexeme, mutability, value, &token.location)?;
+            .define_variable(&token.lexeme, mutability, value, token.location)?;
 
         Ok(())
     }
@@ -206,17 +208,16 @@ impl ExecutionContext {
             Expr::Float(_, val) => Ok(Dynamic::Float(*val)),
             Expr::Integer(_, val) => Ok(Dynamic::Integer(*val)),
             Expr::String(_, val) => Ok(Dynamic::String(val.clone())),
-            Expr::Unary(token, expr) => self.unary(token, expr),
-            Expr::Binary(expr, token, expr1) => self.binary(token, expr, expr1),
+            Expr::Unary(op, expr) => self.unary(*op, expr),
+            Expr::Binary(expr, op, expr1) => self.binary(op, expr, expr1),
             Expr::Condition(expr, token, expr1) => self.conditional(token, expr, expr1),
-            Expr::Variable(identifier) => self.variable(identifier),
+            Expr::Variable(location, identifier) => self.variable(*location, identifier),
             Expr::Nil(_) => Ok(Dynamic::Nil),
-            a => unimplemented!("{a:?}"),
         }
     }
 
-    fn assign(&mut self, token: &Token, stmt: &Stmt) -> Result<(), ExecutionError> {
-        let result = match self.statement(stmt)? {
+    fn assign(&mut self, name: &str, op: AssignmentOp, stmt: &Stmt) -> Result<(), ExecutionError> {
+        let value = match self.statement(stmt)? {
             StmtResult::None => {
                 return Err(ExecutionError::new(
                     stmt.get_location(),
@@ -233,11 +234,76 @@ impl ExecutionContext {
         };
 
         self.scoper
-            .assign_variable(&token.lexeme, result, &token.location)
+            .mut_variable(&name, stmt.get_location(), move |variable, location| {
+                match op {
+                    AssignmentOp::Equal => variable.value = value,
+                    op => {
+                        // Make sure it's the same variant, we don't care about value
+                        if std::mem::discriminant(&variable.value) != std::mem::discriminant(&value)
+                        {
+                            return Err(ExecutionError::new(
+                                location,
+                                ExecutionErrorType::AssignmentOpInvalid(
+                                    variable.value.clone(),
+                                    op,
+                                    value,
+                                ),
+                            ));
+                        }
+
+                        match &mut variable.value {
+                            Dynamic::Integer(a) => match op {
+                                AssignmentOp::PlusEqual => *a += value.unwrap_integer(),
+                                AssignmentOp::MinusEqual => *a -= value.unwrap_integer(),
+                                AssignmentOp::MultiplyEqual => *a *= value.unwrap_integer(),
+                                AssignmentOp::DivideEqual => *a /= value.unwrap_integer(),
+                                AssignmentOp::Equal => unreachable!(),
+                            },
+                            Dynamic::Float(a) => match op {
+                                AssignmentOp::PlusEqual => *a += value.unwrap_float(),
+                                AssignmentOp::MinusEqual => *a -= value.unwrap_float(),
+                                AssignmentOp::MultiplyEqual => *a *= value.unwrap_float(),
+                                AssignmentOp::DivideEqual => *a /= value.unwrap_float(),
+                                AssignmentOp::Equal => unreachable!(),
+                            },
+                            Dynamic::String(a) => match op {
+                                AssignmentOp::PlusEqual => *a += &value.unwrap_string(),
+                                AssignmentOp::Equal => unreachable!(),
+                                op => {
+                                    return Err(ExecutionError::new(
+                                        location,
+                                        ExecutionErrorType::AssignmentOpInvalid(
+                                            variable.value.clone(),
+                                            op,
+                                            value.clone(),
+                                        ),
+                                    ));
+                                }
+                            },
+                            variable => {
+                                return Err(ExecutionError::new(
+                                    location,
+                                    ExecutionErrorType::AssignmentOpInvalid(
+                                        variable.clone(),
+                                        op,
+                                        value.clone(),
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            })
     }
 
-    fn variable(&mut self, token: &Token) -> Result<Dynamic, ExecutionError> {
-        self.scoper.get_variable(&token.lexeme, &token.location)
+    fn variable(
+        &mut self,
+        location: Location,
+        identifier: &str,
+    ) -> Result<Dynamic, ExecutionError> {
+        self.scoper.get_variable(identifier, location)
     }
 
     fn conditional(
@@ -286,24 +352,24 @@ impl ExecutionContext {
 
     fn binary(
         &mut self,
-        token: &Token,
+        op: &BinaryOp,
         expr: &Expr,
         expr1: &Expr,
     ) -> Result<Dynamic, ExecutionError> {
         let left = self.expression(expr)?;
         let right = self.expression(expr1)?;
-        Ok(match token.token_type {
-            TokenType::Minus => match (left, right) {
+        Ok(match op {
+            BinaryOp::Minus => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Integer(a - b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Float(a - b),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::Plus => match (left, right) {
+            BinaryOp::Plus => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Integer(a + b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Float(a + b),
                 (Dynamic::String(a), Dynamic::Integer(b)) => {
@@ -318,28 +384,28 @@ impl ExecutionContext {
                 (Dynamic::String(a), Dynamic::String(b)) => Dynamic::String(a + b.as_str()),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::Star => match (left, right) {
+            BinaryOp::Multiply => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Integer(a * b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Float(a * b),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::Slash => match (left, right) {
+            BinaryOp::Divide => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => {
                     if b != 0 {
                         Dynamic::Integer(a / b)
                     } else {
                         return Err(ExecutionError::new(
-                            token.location.clone(),
+                            expr.get_location(),
                             ExecutionErrorType::DivideByZero,
                         ));
                     }
@@ -349,87 +415,85 @@ impl ExecutionContext {
                         Dynamic::Float(a / b)
                     } else {
                         return Err(ExecutionError::new(
-                            token.location.clone(),
+                            expr.get_location(),
                             ExecutionErrorType::DivideByZero,
                         ));
                     }
                 }
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::Greater => match (left, right) {
+            BinaryOp::Greater => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Bool(a > b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Bool(a > b),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::GreaterEqual => match (left, right) {
+            BinaryOp::GreaterEqual => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Bool(a >= b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Bool(a >= b),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::Less => match (left, right) {
+            BinaryOp::Less => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Bool(a < b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Bool(a < b),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::LessEqual => match (left, right) {
+            BinaryOp::LessEqual => match (left, right) {
                 (Dynamic::Integer(a), Dynamic::Integer(b)) => Dynamic::Bool(a <= b),
                 (Dynamic::Float(a), Dynamic::Float(b)) => Dynamic::Bool(a <= b),
                 (a, b) => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidOperator(a, token.clone(), b),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidOperator(a, *op, b),
                     ));
                 }
             },
-            TokenType::EqualEqual => Dynamic::Bool(left == right),
-            TokenType::BangEqual => Dynamic::Bool(left != right),
-            a => unimplemented!("{a:?}"),
+            BinaryOp::EqualEqual => Dynamic::Bool(left == right),
+            BinaryOp::BangEqual => Dynamic::Bool(left != right),
         })
     }
 
-    fn unary(&mut self, token: &Token, expr: &Expr) -> Result<Dynamic, ExecutionError> {
+    fn unary(&mut self, op: UnaryOp, expr: &Expr) -> Result<Dynamic, ExecutionError> {
         let left = self.expression(expr)?;
-        Ok(match token.token_type {
-            TokenType::Minus => match left {
+        Ok(match op {
+            UnaryOp::Negate => match left {
                 Dynamic::Integer(val) => Dynamic::Integer(-val),
                 Dynamic::Float(val) => Dynamic::Float(-val),
                 a => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidUnaryOperator(token.clone(), a),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidUnaryOperator(op, a),
                     ));
                 }
             },
-            TokenType::Bang => match left {
+            UnaryOp::Invert => match left {
                 Dynamic::Bool(val) => Dynamic::Bool(!val),
                 a => {
                     return Err(ExecutionError::new(
-                        token.location.clone(),
-                        ExecutionErrorType::InvalidUnaryOperator(token.clone(), a),
+                        expr.get_location(),
+                        ExecutionErrorType::InvalidUnaryOperator(op, a),
                     ));
                 }
             },
-            a => unimplemented!("{a:?}"),
         })
     }
 }

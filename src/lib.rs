@@ -1,20 +1,23 @@
+mod benching;
 mod machine;
 mod parser;
 mod scanner;
 mod walker;
 
-use std::{
-    collections::HashMap,
-    fs,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, fs};
 
 use crate::{
-    parser::{Parser, VariableMutability},
-    scanner::{Scanner, Token},
+    parser::{AssignmentOp, BinaryOp, Parser, UnaryOp, VariableMutability},
+    scanner::Scanner,
 };
 
-pub fn run(source: String) {
+pub fn run(script_name: String) {
+    benching::bench(&script_name);
+    return;
+
+    println!("Running: {script_name}");
+    let source = fs::read_to_string(script_name + ".hail").expect("Script should be at location.");
+
     let mut scanner = Scanner::new(source);
     scanner.scan();
 
@@ -36,55 +39,20 @@ pub fn run(source: String) {
     }
 
     if let Some(stmts) = parser.get() {
-        println!("2...");
-        std::thread::sleep(Duration::from_secs(1));
-        println!("1...");
-        std::thread::sleep(Duration::from_secs(1));
-
-        let vm = machine::Vm::new(stmts);
         println!("Running walker...");
-        for _ in 0..10 {
-            let start = Instant::now();
-            let result = walker::ExecutionContext::new().run(stmts);
-            let end = start.elapsed();
-            //println!("Result: {result:?}");
-            println!("Walker took {:.5} seconds", end.as_secs_f64());
-        }
+        let result = walker::ExecutionContext::new().run(stmts);
+        println!("Result: {result:?}");
 
-        println!("2...");
-        std::thread::sleep(Duration::from_secs(1));
-        println!("1...");
-        std::thread::sleep(Duration::from_secs(1));
         let vm = machine::Vm::new(stmts);
         println!("Running machine...");
-        for _ in 0..10 {
-            let start = Instant::now();
-            let result = vm.run();
-            let end = start.elapsed();
-            //println!("Result: {result:?}");
-            println!("Machine took {:.5} seconds", end.as_secs_f64());
-        }
+        let result = vm.run();
+        println!("Result: {result:?}");
     } else {
         println!("Failed to get statements.");
     }
 
-    println!("Benching Rhai");
-    println!("2...");
-    std::thread::sleep(Duration::from_secs(1));
-    println!("1...");
-    std::thread::sleep(Duration::from_secs(1));
-    let engine = rhai::Engine::new();
-    let ast = engine
-        .compile(fs::read_to_string("./loop_bench.rhai").unwrap())
-        .unwrap();
-    let ast = engine.optimize_ast(&rhai::Scope::new(), ast, rhai::OptimizationLevel::Full);
-
-    for _ in 0..10 {
-        let start = Instant::now();
-        engine.run_ast(&ast).unwrap();
-        let end = start.elapsed();
-        println!("Rhai took {:.5} seconds", end.as_secs_f64());
-    }
+    /*
+     */
 }
 
 #[derive(Default)]
@@ -117,7 +85,7 @@ impl Scoper {
         name: &str,
         mutability: VariableMutability,
         value: Dynamic,
-        location: &Location,
+        location: Location,
     ) -> Result<(), ExecutionError> {
         // If it's a constant, make sure we're not bypassing the fact it's a constant by redefining it
         // Constants are still *scoped*, this is more of a "enforce good behavior" that can be removed if needed
@@ -128,7 +96,7 @@ impl Scoper {
                 && found.mutability == VariableMutability::Constant
             {
                 return Err(ExecutionError::new(
-                    location.clone(),
+                    location,
                     ExecutionErrorType::RedefinedConstant,
                 ));
             }
@@ -142,29 +110,32 @@ impl Scoper {
         Ok(())
     }
 
-    pub fn assign_variable(
+    pub fn mut_variable(
         &mut self,
         name: &str,
-        value: Dynamic,
-        location: &Location,
+        location: Location,
+        modify: impl FnOnce(&mut VariableState, Location) -> Result<(), ExecutionError>,
     ) -> Result<(), ExecutionError> {
         let len = self.scopes.len();
         for i in 0..len {
+            // Reverse loop
             let i = len - i - 1;
+
+            // Search for variable we can mutate
             if let Some(found) = self.scopes[i].variables.get_mut(name) {
                 if found.mutability != VariableMutability::Mutable {
                     return Err(ExecutionError::new(
-                        location.clone(),
+                        location,
                         ExecutionErrorType::VariableImmutable(name.to_string()),
                     ));
                 }
-                found.value = value;
-                return Ok(());
+
+                return modify(found, location);
             }
         }
 
         Err(ExecutionError::new(
-            location.clone(),
+            location,
             ExecutionErrorType::VariableUndefined(name.to_string()),
         ))
     }
@@ -172,7 +143,7 @@ impl Scoper {
     pub fn get_variable(
         &mut self,
         name: &str,
-        location: &Location,
+        location: Location,
     ) -> Result<Dynamic, ExecutionError> {
         let len = self.scopes.len();
         for i in 0..len {
@@ -183,7 +154,7 @@ impl Scoper {
         }
 
         Err(ExecutionError::new(
-            location.clone(),
+            location,
             ExecutionErrorType::VariableUndefined(name.to_string()),
         ))
     }
@@ -196,6 +167,29 @@ pub enum Dynamic {
     Float(f64),
     String(String),
     Nil,
+}
+
+impl Dynamic {
+    pub fn unwrap_integer(self) -> i64 {
+        let Dynamic::Integer(val) = self else {
+            unreachable!("Unwrap should be done carefully!");
+        };
+        val
+    }
+
+    pub fn unwrap_float(self) -> f64 {
+        let Dynamic::Float(val) = self else {
+            unreachable!("Unwrap should be done carefully!");
+        };
+        val
+    }
+
+    pub fn unwrap_string(self) -> String {
+        let Dynamic::String(val) = self else {
+            unreachable!("Unwrap should be done carefully!");
+        };
+        val
+    }
 }
 
 impl PartialEq for Dynamic {
@@ -216,13 +210,14 @@ impl Eq for Dynamic {}
 enum ExecutionErrorType {
     VariableImmutable(String),
     VariableUndefined(String),
-    InvalidOperator(Dynamic, Token, Dynamic),
-    InvalidUnaryOperator(Token, Dynamic),
+    InvalidOperator(Dynamic, BinaryOp, Dynamic),
+    InvalidUnaryOperator(UnaryOp, Dynamic),
     DivideByZero,
     NoValue,
     UnexpectedReturningStatement,
     RedefinedConstant,
     ExpectedBoolean,
+    AssignmentOpInvalid(Dynamic, AssignmentOp, Dynamic),
 }
 
 #[derive(Debug)]
@@ -251,11 +246,11 @@ impl VariableState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Location {
-    line: usize,
-    column: usize,
-    length: usize,
+    line: u32,
+    column: u16,
+    length: u16,
 }
 
 impl Default for Location {
@@ -270,10 +265,11 @@ impl Default for Location {
 
 impl Location {
     pub fn new(line: usize, column: usize, length: usize) -> Location {
+        // Convert these to smaller types, maintains the nice interface
         Location {
-            line,
-            column,
-            length,
+            line: line as u32,
+            column: column as u16,
+            length: length as u16,
         }
     }
 }

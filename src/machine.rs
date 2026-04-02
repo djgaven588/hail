@@ -1,7 +1,6 @@
 use crate::{
-    Dynamic, ExecutionError, Location, Scope, Scoper,
-    parser::{Expr, Stmt, VariableMutability},
-    scanner::{Token, TokenType},
+    Dynamic, ExecutionError, ExecutionErrorType, Location, Scope, Scoper,
+    parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
 #[derive(Debug)]
@@ -24,30 +23,12 @@ enum InstructionType {
     Binary(BinaryOp),
     // Name, has initializer, mutability
     DefineVariable(String, bool, VariableMutability),
-    ModifyVariable(String),
+    ModifyVariable(String, AssignmentOp),
     Print,
     JumpOnFalse(usize),
     Jump(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UnaryOp {
-    Negate,
-    Invert,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BinaryOp {
-    Plus,
-    Minus,
-    Multiply,
-    Divide,
-    Greater,
-    GreaterEqual,
-    Less,
-    LessEqual,
-    EqualEqual,
-    BangEqual,
+    PushScope,
+    PopScope,
 }
 
 #[derive(Default)]
@@ -84,7 +65,7 @@ impl Vm {
 
                 // *Then* take from the stack
                 self.program.push(Instruction::new(
-                    token.location.clone(),
+                    token.location,
                     InstructionType::DefineVariable(
                         token.lexeme.clone(),
                         stmt.is_some(),
@@ -103,19 +84,70 @@ impl Vm {
                     InstructionType::Print,
                 ));
             }
-            Stmt::Return(stmt) => todo!(),
-            Stmt::Assign(token, stmt) => {
+            Stmt::Return(location, stmt) => todo!(),
+            Stmt::Assign(name, op, stmt) => {
                 // Push value to stack
                 self.statement(stmt);
 
                 // Update variable
                 self.program.push(Instruction::new(
-                    token.location.clone(),
-                    InstructionType::ModifyVariable(token.lexeme.to_string()),
+                    stmt.get_location(),
+                    InstructionType::ModifyVariable(name.to_string(), *op),
                 ));
             }
-            Stmt::Block(stmts) => self.statements(stmts),
-            Stmt::If(stmt, stmt1, stmt2) => todo!(),
+            Stmt::Block(stmts) => {
+                self.program.push(Instruction::new(
+                    stmts.first().unwrap().get_location(),
+                    InstructionType::PushScope,
+                ));
+
+                self.statements(stmts);
+
+                self.program.push(Instruction::new(
+                    stmts.last().unwrap().get_location(),
+                    InstructionType::PopScope,
+                ));
+            }
+            Stmt::If(stmt, stmt1, stmt2) => {
+                // Evaluate condition
+                self.statement(stmt);
+
+                // Check if we need to go to the end
+                let else_jump = self.program.len();
+                self.program.push(Instruction::new(
+                    stmt.get_location(),
+                    // Initialize to 0 as we don't know how long this is going to be
+                    InstructionType::JumpOnFalse(0),
+                ));
+
+                // If we don't jump, evaluate the if
+                self.statement(stmt1);
+
+                // Check if we need to go to the end
+                if let Some(stmt2) = stmt2 {
+                    // If we've got an else, jump over it
+                    let end_jump_instruction = self.program.len();
+                    self.program.push(Instruction::new(
+                        stmt.get_location(),
+                        // Initialize to 0 as we don't know how long this is going to be
+                        InstructionType::Jump(0),
+                    ));
+
+                    let else_begin = self.program.len();
+                    self.program[else_jump].value = InstructionType::JumpOnFalse(else_begin);
+
+                    // Else
+                    self.statement(stmt2);
+
+                    // Update original jump over to refer to the end of this statement
+                    let else_end_instruction = self.program.len();
+                    self.program[end_jump_instruction].value =
+                        InstructionType::Jump(else_end_instruction);
+                } else {
+                    let if_end = self.program.len();
+                    self.program[else_jump].value = InstructionType::JumpOnFalse(if_end);
+                }
+            }
             Stmt::While(stmt, stmt1) => {
                 // Mark where this begins
                 let loop_start = self.program.len();
@@ -151,44 +183,50 @@ impl Vm {
     fn expression(&mut self, expr: &Expr) {
         match expr {
             Expr::Float(location, value) => self.program.push(Instruction::new(
-                location.clone(),
+                *location,
                 InstructionType::Constant(Dynamic::Float(*value)),
             )),
             Expr::Integer(location, value) => self.program.push(Instruction::new(
-                location.clone(),
+                *location,
                 InstructionType::Constant(Dynamic::Integer(*value)),
             )),
             Expr::Bool(location, value) => self.program.push(Instruction::new(
-                location.clone(),
+                *location,
                 InstructionType::Constant(Dynamic::Bool(*value)),
             )),
             Expr::String(location, value) => self.program.push(Instruction::new(
-                location.clone(),
+                *location,
                 InstructionType::Constant(Dynamic::String(value.clone())),
             )),
             Expr::Nil(location) => self.program.push(Instruction::new(
-                location.clone(),
+                *location,
                 InstructionType::Constant(Dynamic::Nil),
             )),
-            Expr::Unary(token, expr) => {
+            Expr::Unary(op, expr) => {
                 // Push expression to stack
                 self.expression(expr);
 
-                self.unary(token);
+                self.program.push(Instruction::new(
+                    expr.get_location(),
+                    InstructionType::Unary(*op),
+                ));
             }
-            Expr::Binary(expr, token, expr1) => {
+            Expr::Binary(expr, op, expr1) => {
                 // Push A to stack
                 self.expression(expr);
                 // Push B to stack
                 self.expression(expr1);
 
                 // Operate
-                self.binary(token);
-            }
-            Expr::Variable(token) => {
                 self.program.push(Instruction::new(
-                    token.location.clone(),
-                    InstructionType::Variable(token.lexeme.to_string()),
+                    expr.get_location(),
+                    InstructionType::Binary(*op),
+                ));
+            }
+            Expr::Variable(location, identifier) => {
+                self.program.push(Instruction::new(
+                    *location,
+                    InstructionType::Variable(identifier.to_string()),
                 ));
             }
             Expr::Condition(expr, token, expr1) => {
@@ -199,36 +237,6 @@ impl Vm {
                 //self::condition(program, expr, token, expr1);
             }
         }
-    }
-
-    fn unary(&mut self, op: &Token) {
-        self.program.push(Instruction::new(
-            op.location.clone(),
-            InstructionType::Unary(match op.token_type {
-                TokenType::Minus => UnaryOp::Negate,
-                TokenType::Bang => UnaryOp::Invert,
-                a => unimplemented!("{a:?}"),
-            }),
-        ));
-    }
-
-    fn binary(&mut self, op: &Token) {
-        self.program.push(Instruction::new(
-            op.location.clone(),
-            InstructionType::Binary(match op.token_type {
-                TokenType::Minus => BinaryOp::Minus,
-                TokenType::Plus => BinaryOp::Plus,
-                TokenType::Slash => BinaryOp::Divide,
-                TokenType::Star => BinaryOp::Multiply,
-                TokenType::BangEqual => BinaryOp::BangEqual,
-                TokenType::EqualEqual => BinaryOp::EqualEqual,
-                TokenType::Greater => BinaryOp::Greater,
-                TokenType::GreaterEqual => BinaryOp::GreaterEqual,
-                TokenType::Less => BinaryOp::Less,
-                TokenType::LessEqual => BinaryOp::LessEqual,
-                a => unimplemented!("{a:?}"),
-            }),
-        ));
     }
 
     pub fn run(&self) -> Result<Option<Dynamic>, ExecutionError> {
@@ -256,7 +264,7 @@ impl VmContext {
     fn run(mut self, program: &[Instruction]) -> Result<Option<Dynamic>, ExecutionError> {
         while let Some(instruction) = program.get(self.counter) {
             //println!("Instruction: {instruction:?}");
-            self.location = instruction.location.clone();
+            self.location = instruction.location;
             match &instruction.value {
                 InstructionType::Print => println!("Print: {:?}", self.stack.pop().unwrap()),
                 InstructionType::Constant(dynamic) => self.stack.push(dynamic.clone()),
@@ -269,7 +277,7 @@ impl VmContext {
                         } else {
                             Dynamic::Nil
                         },
-                        &instruction.location,
+                        instruction.location,
                     )?;
                 }
                 InstructionType::Unary(op) => self.unary_op(op),
@@ -278,10 +286,9 @@ impl VmContext {
                 }
                 InstructionType::Variable(name) => self
                     .stack
-                    .push(self.scoper.get_variable(name, &self.location)?),
-                InstructionType::ModifyVariable(name) => {
-                    self.scoper
-                        .assign_variable(name, self.stack.pop().unwrap(), &self.location)?;
+                    .push(self.scoper.get_variable(name, self.location)?),
+                InstructionType::ModifyVariable(name, op) => {
+                    self.assign(name, *op)?;
                 }
                 InstructionType::JumpOnFalse(address) => {
                     let Dynamic::Bool(cond) = self.stack.pop().unwrap() else {
@@ -299,12 +306,77 @@ impl VmContext {
                     // Continue as we've modified the address ourselves
                     continue;
                 }
+                InstructionType::PushScope => self.scoper.push(None),
+                InstructionType::PopScope => self.scoper.pop(),
             }
 
             self.counter += 1;
         }
 
         Ok(self.stack.pop())
+    }
+
+    fn assign(&mut self, name: &str, op: AssignmentOp) -> Result<(), ExecutionError> {
+        let value = self.stack.pop().unwrap();
+
+        self.scoper
+            .mut_variable(name, self.location, move |variable, location| {
+                if op == AssignmentOp::Equal {
+                    variable.value = value;
+                    return Ok(());
+                }
+
+                // Make sure it's the same variant, we don't care about value
+                if std::mem::discriminant(&variable.value) != std::mem::discriminant(&value) {
+                    return Err(ExecutionError::new(
+                        location,
+                        ExecutionErrorType::AssignmentOpInvalid(variable.value.clone(), op, value),
+                    ));
+                }
+
+                match &mut variable.value {
+                    Dynamic::Integer(a) => match op {
+                        AssignmentOp::PlusEqual => *a += value.unwrap_integer(),
+                        AssignmentOp::MinusEqual => *a -= value.unwrap_integer(),
+                        AssignmentOp::MultiplyEqual => *a *= value.unwrap_integer(),
+                        AssignmentOp::DivideEqual => *a /= value.unwrap_integer(),
+                        AssignmentOp::Equal => unreachable!(),
+                    },
+                    Dynamic::Float(a) => match op {
+                        AssignmentOp::PlusEqual => *a += value.unwrap_float(),
+                        AssignmentOp::MinusEqual => *a -= value.unwrap_float(),
+                        AssignmentOp::MultiplyEqual => *a *= value.unwrap_float(),
+                        AssignmentOp::DivideEqual => *a /= value.unwrap_float(),
+                        AssignmentOp::Equal => unreachable!(),
+                    },
+                    Dynamic::String(a) => match op {
+                        AssignmentOp::PlusEqual => *a += &value.unwrap_string(),
+                        AssignmentOp::Equal => unreachable!(),
+                        op => {
+                            return Err(ExecutionError::new(
+                                location,
+                                ExecutionErrorType::AssignmentOpInvalid(
+                                    variable.value.clone(),
+                                    op,
+                                    value.clone(),
+                                ),
+                            ));
+                        }
+                    },
+                    variable => {
+                        return Err(ExecutionError::new(
+                            location,
+                            ExecutionErrorType::AssignmentOpInvalid(
+                                variable.clone(),
+                                op,
+                                value.clone(),
+                            ),
+                        ));
+                    }
+                }
+
+                Ok(())
+            })
     }
 
     fn unary_op(&mut self, op: &UnaryOp) {

@@ -1,4 +1,4 @@
-use crate::Location;
+use crate::{Location, parser::AssignmentOp};
 
 const KEYWORDS: [(&str, TokenType); 16] = [
     ("let", TokenType::Let),
@@ -24,6 +24,16 @@ pub struct Token {
     pub location: Location,
     pub token_type: TokenType,
     pub lexeme: String,
+}
+
+impl Token {
+    pub fn new(location: Location, token_type: TokenType, lexeme: &str) -> Token {
+        Token {
+            location,
+            token_type,
+            lexeme: lexeme.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +68,10 @@ pub enum TokenType {
     And,
     BinaryOr,
     Or,
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
 
     // Literals
     Identifier,
@@ -88,12 +102,36 @@ pub enum TokenType {
     Eof,
 }
 
-impl Token {
-    pub fn new(location: Location, token_type: TokenType, lexeme: &str) -> Token {
-        Token {
-            location,
-            token_type,
-            lexeme: lexeme.to_string(),
+impl TokenType {
+    pub fn is_assignment_op(&self) -> bool {
+        match self {
+            TokenType::Equal
+            | TokenType::PlusEqual
+            | TokenType::MinusEqual
+            | TokenType::StarEqual
+            | TokenType::SlashEqual => true,
+            _ => false,
+        }
+    }
+
+    pub fn assignment_ops() -> &'static [TokenType] {
+        &[
+            TokenType::Equal,
+            TokenType::PlusEqual,
+            TokenType::MinusEqual,
+            TokenType::StarEqual,
+            TokenType::SlashEqual,
+        ]
+    }
+
+    pub fn unwrap_assignment_op(&self) -> AssignmentOp {
+        match self {
+            TokenType::Equal => AssignmentOp::Equal,
+            TokenType::PlusEqual => AssignmentOp::PlusEqual,
+            TokenType::MinusEqual => AssignmentOp::MinusEqual,
+            TokenType::StarEqual => AssignmentOp::MultiplyEqual,
+            TokenType::SlashEqual => AssignmentOp::DivideEqual,
+            a => unreachable!("{a:?}"),
         }
     }
 }
@@ -132,7 +170,7 @@ impl Scanner {
         let Some(next) = self.consume() else {
             self.is_done = true;
             self.tokens
-                .push(Token::new(self.location.clone(), TokenType::Eof, ""));
+                .push(Token::new(self.location, TokenType::Eof, ""));
             return false;
         };
 
@@ -152,9 +190,27 @@ impl Scanner {
             ']' => self.push_token(TokenType::RightSquare),
             ',' => self.push_token(TokenType::Comma),
             '.' => self.push_token(TokenType::Dot),
-            '-' => self.push_token(TokenType::Minus),
-            '+' => self.push_token(TokenType::Plus),
-            '*' => self.push_token(TokenType::Star),
+            '-' => {
+                if self.try_match('=') {
+                    self.push_token(TokenType::MinusEqual);
+                } else {
+                    self.push_token(TokenType::Minus);
+                }
+            }
+            '+' => {
+                if self.try_match('=') {
+                    self.push_token(TokenType::PlusEqual);
+                } else {
+                    self.push_token(TokenType::Plus);
+                }
+            }
+            '*' => {
+                if self.try_match('=') {
+                    self.push_token(TokenType::StarEqual);
+                } else {
+                    self.push_token(TokenType::Star);
+                }
+            }
             ':' => {
                 if self.try_match(':') {
                     self.push_token(TokenType::Scope);
@@ -164,7 +220,11 @@ impl Scanner {
             }
             ';' => self.push_token(TokenType::Semicolon),
             '/' => {
-                self.slash_parse();
+                if self.try_match('=') {
+                    self.push_token(TokenType::SlashEqual);
+                } else {
+                    self.slash_parse();
+                }
             }
             '!' => {
                 if self.try_match('=') {
@@ -220,14 +280,14 @@ impl Scanner {
                     // This is whitespace, ignore.
                 } else {
                     self.syntax_errors.push(SyntaxError::new(
-                        self.location.clone(),
+                        self.location,
                         SyntaxErrorType::UnexpectedCharacter(v),
                     ));
                 }
             }
         }
 
-        self.working_start += self.location.length;
+        self.working_start += self.location.length as usize;
         self.location.column += self.location.length;
         self.location.length = 0;
 
@@ -250,7 +310,7 @@ impl Scanner {
         // Terminate
         if !self.try_match('"') {
             self.syntax_errors.push(SyntaxError::new(
-                self.location.clone(),
+                self.location,
                 SyntaxErrorType::UnterminatedString,
             ));
         } else {
@@ -268,7 +328,8 @@ impl Scanner {
         }
 
         if let Some(keyword) = KEYWORDS.iter().find(|v| {
-            v.0 == &self.source[self.working_start..(self.working_start + self.location.length)]
+            v.0 == &self.source
+                [self.working_start..(self.working_start + self.location.length as usize)]
         }) {
             self.push_token(keyword.1);
         } else {
@@ -353,7 +414,7 @@ impl Scanner {
                 // Just a comment
             } else {
                 self.syntax_errors.push(SyntaxError::new(
-                    self.location.clone(),
+                    self.location,
                     SyntaxErrorType::UnterminatedComment,
                 ));
             }
@@ -365,22 +426,22 @@ impl Scanner {
 
     fn push_token(&mut self, token_type: TokenType) {
         self.tokens.push(Token::new(
-            self.location.clone(),
+            self.location,
             token_type,
-            &self.source[self.working_start..(self.working_start + self.location.length)],
+            &self.source[self.working_start..(self.working_start + self.location.length as usize)],
         ));
     }
 
     fn consume(&mut self) -> Option<char> {
-        let remaining = &self.source[(self.working_start + self.location.length)..];
+        let remaining = &self.source[(self.working_start + self.location.length as usize)..];
         let character = remaining.chars().next()?;
-        self.location.length += character.len_utf8();
+        self.location.length += character.len_utf8() as u16;
 
         Some(character)
     }
 
     fn try_match(&mut self, expected: char) -> bool {
-        let remaining = &self.source[(self.working_start + self.location.length)..];
+        let remaining = &self.source[(self.working_start + self.location.length as usize)..];
         let next = remaining.chars().next();
         if next.is_some_and(|v| v == expected) {
             // We don't need to care about the result, but we need to still consume it
@@ -392,12 +453,12 @@ impl Scanner {
     }
 
     fn peek(&self) -> Option<char> {
-        let remaining = &self.source[(self.working_start + self.location.length)..];
+        let remaining = &self.source[(self.working_start + self.location.length as usize)..];
         remaining.chars().next()
     }
 
     fn peek_next(&self) -> Option<char> {
-        let remaining = &self.source[(self.working_start + self.location.length)..];
+        let remaining = &self.source[(self.working_start + self.location.length as usize)..];
         let mut chars = remaining.chars();
         chars.next()?;
         chars.next()

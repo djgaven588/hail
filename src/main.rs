@@ -1,5 +1,3 @@
-use std::fs;
-
 use hail::run;
 
 fn main() {
@@ -13,7 +11,5 @@ fn main() {
     }
     let _run_path = args.next().unwrap();
     let script = args.next().unwrap();
-    println!("Running: {script}");
-    let source = fs::read_to_string(script).expect("Script should be at location.");
-    run(source);
+    run(script);
 }
