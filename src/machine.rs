@@ -1,5 +1,7 @@
+use std::{any::Any, sync::Arc};
+
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Location, Scope, Scoper,
+    Dynamic, ExecutionError, ExecutionErrorType, Executor, Location, Module, Scope, Scoper,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
@@ -17,28 +19,55 @@ impl Instruction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InstructionType {
+    // Weirdo
+    Print,
+
+    // Values
     Constant(Dynamic),
     Variable(String),
+
+    // Ops
     Unary(UnaryOp),
     Binary(BinaryOp),
+
+    // Variables
     // Name, has initializer, mutability
     DefineVariable(String, bool, VariableMutability),
     ModifyVariable(String, AssignmentOp),
-    Print,
+
+    // Jumps
     JumpOnFalse(usize),
     Jump(usize),
+
+    // Manage stack
     PushScope,
     PopScope,
+
+    // Call a function with X parameters
+    Call(usize),
 }
 
-#[derive(Default)]
 pub struct Vm {
     program: Vec<Instruction>,
+    module: Arc<Module>,
+}
+
+impl Default for Vm {
+    fn default() -> Self {
+        Self {
+            program: Default::default(),
+            module: Arc::new(Module::default()),
+        }
+    }
 }
 
 impl Vm {
-    pub fn new(stmts: &[Stmt]) -> Vm {
-        let mut vm = Vm::default();
+    pub fn new(module: Arc<Module>, stmts: &[Stmt]) -> Vm {
+        let mut vm = Vm {
+            program: vec![],
+            module,
+        };
+
         vm.statements(stmts);
 
         //println!("VM Instructions:");
@@ -236,11 +265,28 @@ impl Vm {
                 todo!()
                 //self::condition(program, expr, token, expr1);
             }
+            Expr::Call(callee, params) => {
+                // Push callee to stack
+                self.expression(callee);
+
+                // Each parameter is loaded in order
+                // The call function is special and "snacks" on the stack instead of popping each element
+                for param in params {
+                    self.expression(param);
+                }
+
+                // Tell it we want to call the callee with X params
+                // TODO: Could this be ignored if this is all type checked?
+                self.program.push(Instruction::new(
+                    callee.get_location(),
+                    InstructionType::Call(params.len()),
+                ));
+            }
         }
     }
 
     pub fn run(&self) -> Result<Option<Dynamic>, ExecutionError> {
-        VmContext::new(None).run(&self.program)
+        VmContext::new(self.module.clone(), None).run(&self.program)
     }
 }
 
@@ -251,10 +297,12 @@ struct VmContext {
     location: Location,
 }
 
+impl Executor for VmContext {}
+
 impl VmContext {
-    fn new(scope: Option<Scope>) -> VmContext {
+    fn new(module: Arc<Module>, scope: Option<Scope>) -> VmContext {
         VmContext {
-            scoper: Scoper::new(scope),
+            scoper: Scoper::new(module, scope),
             stack: vec![],
             counter: 0,
             location: Location::default(),
@@ -308,6 +356,49 @@ impl VmContext {
                 }
                 InstructionType::PushScope => self.scoper.push(None),
                 InstructionType::PopScope => self.scoper.pop(),
+                InstructionType::Call(params) => {
+                    // Snack on the stack
+                    let params = self.stack.split_off(self.stack.len() - params);
+                    let callee = self.stack.pop().expect("Should have callee after params");
+
+                    match callee {
+                        Dynamic::NativeFunc(native_func_info) => {
+                            if params.len() != native_func_info.signature.len() {
+                                return Err(ExecutionError::new(
+                                    self.location,
+                                    ExecutionErrorType::MismatchedSignature(
+                                        native_func_info.param_info.clone(),
+                                        params,
+                                    ),
+                                ));
+                            }
+
+                            for i in 0..params.len() {
+                                if params[i].get_type() != native_func_info.signature[i] {
+                                    return Err(ExecutionError::new(
+                                        self.location,
+                                        ExecutionErrorType::MismatchedSignature(
+                                            native_func_info.param_info.clone(),
+                                            params,
+                                        ),
+                                    ));
+                                }
+                            }
+
+                            // Execute the function and conditionally push to the stack
+                            // TODO: Is this correct? Or should Nil return?
+                            if let Some(val) = (native_func_info.call)(&mut self, params)? {
+                                self.stack.push(val);
+                            }
+                        }
+                        a => {
+                            return Err(ExecutionError::new(
+                                self.location,
+                                ExecutionErrorType::NotAFunction(a),
+                            ));
+                        }
+                    }
+                }
             }
 
             self.counter += 1;
@@ -384,7 +475,7 @@ impl VmContext {
             (UnaryOp::Negate, Dynamic::Integer(value)) => *value = -*value,
             (UnaryOp::Negate, Dynamic::Float(value)) => *value = -*value,
             (UnaryOp::Invert, Dynamic::Bool(value)) => *value = !*value,
-            a => unimplemented!("{a:?}"),
+            a => unimplemented!("Compile error: {a:?}"),
         }
     }
 
@@ -401,6 +492,7 @@ impl VmContext {
                 Dynamic::Float(val) => *a += &val.to_string(),
                 Dynamic::String(val) => *a += &val,
                 Dynamic::Nil => *a += "Nil",
+                Dynamic::NativeFunc(func_info) => unimplemented!("Compile error: {func_info:?}"),
             },
             (BinaryOp::Minus, Dynamic::Integer(a), Dynamic::Integer(b)) => *a -= b,
             (BinaryOp::Minus, Dynamic::Float(a), Dynamic::Float(b)) => *a -= b,
@@ -442,21 +534,27 @@ impl VmContext {
             (BinaryOp::EqualEqual, Dynamic::String(a), Dynamic::String(b)) => {
                 *var_a = Dynamic::Bool(*a == b)
             }
+            (BinaryOp::EqualEqual, Dynamic::NativeFunc(a), Dynamic::NativeFunc(b)) => {
+                *var_a = Dynamic::Bool(Arc::ptr_eq(a, &b))
+            }
             (BinaryOp::EqualEqual, Dynamic::Nil, b) => *var_a = Dynamic::Bool(Dynamic::Nil == b),
             (BinaryOp::EqualEqual, a, Dynamic::Nil) => **a = Dynamic::Bool(&Dynamic::Nil == *a),
-            (BinaryOp::BangEqual, Dynamic::Bool(a), Dynamic::Bool(b)) => *a = *a == b,
+            (BinaryOp::BangEqual, Dynamic::Bool(a), Dynamic::Bool(b)) => *a = *a != b,
             (BinaryOp::BangEqual, Dynamic::Integer(a), Dynamic::Integer(b)) => {
-                *var_a = Dynamic::Bool(*a == b)
+                *var_a = Dynamic::Bool(*a != b)
             }
             (BinaryOp::BangEqual, Dynamic::Float(a), Dynamic::Float(b)) => {
-                *var_a = Dynamic::Bool(*a == b)
+                *var_a = Dynamic::Bool(*a != b)
             }
             (BinaryOp::BangEqual, Dynamic::String(a), Dynamic::String(b)) => {
-                *var_a = Dynamic::Bool(*a == b)
+                *var_a = Dynamic::Bool(*a != b)
             }
-            (BinaryOp::BangEqual, Dynamic::Nil, b) => *var_a = Dynamic::Bool(Dynamic::Nil == b),
-            (BinaryOp::BangEqual, a, Dynamic::Nil) => **a = Dynamic::Bool(&Dynamic::Nil == *a),
-            (op, a, b) => unimplemented!("{op:?} {a:?} {b:?}"),
+            (BinaryOp::BangEqual, Dynamic::NativeFunc(a), Dynamic::NativeFunc(b)) => {
+                *var_a = Dynamic::Bool(!Arc::ptr_eq(a, &b))
+            }
+            (BinaryOp::BangEqual, Dynamic::Nil, b) => *var_a = Dynamic::Bool(Dynamic::Nil != b),
+            (BinaryOp::BangEqual, a, Dynamic::Nil) => **a = Dynamic::Bool(&Dynamic::Nil != *a),
+            (op, a, b) => unimplemented!("Compile error: {op:?} {a:?} {b:?}"),
         }
     }
 }

@@ -50,11 +50,11 @@ for (let mut i = 0; i < 5; i = i + 1;) {
 	print i;
 }
 
-let result = if second_var < 2.0 && true {
+let result = if second_var < 2.0 {
 	print "Greater!";
 	true
 } else {
-	print "Lesser :(";
+	print SOMETHING("A thing!");
 	false
 };
 

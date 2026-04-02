@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::scanner::Scanner;
+use crate::{library, scanner::Scanner};
 
 pub fn bench(script_name: &str) {
     println!("Running benchmark for script '{script_name}'");
@@ -43,7 +43,7 @@ fn walker_bench(script_name: &str) {
     println!("Running walker...");
     for _ in 0..10 {
         let start = Instant::now();
-        let result = crate::walker::ExecutionContext::new().run(parser.get().unwrap());
+        let result = crate::walker::ExecutionContext::new(library()).run(parser.get().unwrap());
         let end = start.elapsed();
         //println!("Result: {result:?}");
         println!("Walker took {:.5} seconds", end.as_secs_f64());
@@ -65,7 +65,7 @@ fn machine_bench(script_name: &str) {
         panic!("{:?}", parser.errors());
     }
 
-    let vm = crate::machine::Vm::new(parser.get().unwrap());
+    let vm = crate::machine::Vm::new(library(), parser.get().unwrap());
     println!("Running machine...");
     for _ in 0..10 {
         let start = Instant::now();

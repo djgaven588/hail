@@ -29,6 +29,7 @@ enum ParseErrorType {
     ExpectedCondition,
     ExpectedForBody,
     ExpectedAssignmentOp,
+    ExpectedComma,
 }
 
 #[derive(Debug)]
@@ -86,7 +87,10 @@ impl Parser {
     }
 
     fn declaration(&mut self) -> Option<Stmt> {
-        let stmt = if self.try_match(&[TokenType::Let]).is_some() {
+        let stmt = if self.try_match(&[TokenType::Fn]).is_some() {
+            todo!()
+            //self.function_declaration()
+        } else if self.try_match(&[TokenType::Let]).is_some() {
             self.var_declaration()
         } else if self.try_match(&[TokenType::Const]).is_some() {
             self.const_declaration()
@@ -392,6 +396,23 @@ impl Parser {
         }
 
         Some(left)
+    }
+
+    fn call(&mut self, callee: Expr) -> Option<Expr> {
+        let mut params = vec![];
+        loop {
+            // See if we've hit the end
+            if self.try_match(&[TokenType::RightParenthese]).is_some() {
+                break;
+            }
+
+            params.push(Box::new(self.parse_precendence(Precedence::Primary)?));
+
+            // Try and remove the comma that follows
+            let _ = self.try_match(&[TokenType::Comma]);
+        }
+
+        Some(Expr::Call(Box::new(callee), params))
     }
 
     fn grouping(&mut self) -> Option<Expr> {
@@ -713,6 +734,8 @@ pub enum Expr {
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     Variable(Location, String),
     Condition(Box<Expr>, Token, Box<Expr>),
+    // Callee and its parameters
+    Call(Box<Expr>, Vec<Box<Expr>>),
 }
 
 impl Expr {
@@ -727,6 +750,7 @@ impl Expr {
             Expr::Binary(expr, _, _) => expr.get_location(),
             Expr::Variable(location, _) => *location,
             Expr::Condition(_, token, _) => token.location,
+            Expr::Call(expr, _) => expr.get_location(),
         }
     }
 }
@@ -755,15 +779,10 @@ impl Expr {
             }
             Expr::Variable(_, identifier) => {
                 "\t".repeat(level) + "Variable: " + identifier.as_str() + "\n"
-            } /*
-              Expr::Assign(identifier, value) => {
-                  "\t".repeat(level)
-                      + "Assign: "
-                      + &identifier.lexeme.to_string()
-                      + " = \n"
-                      + &value.display(level + 1)
-                      + "\n"
-              } */
+            }
+            Expr::Call(expr, exprs) => {
+                "\t".repeat(level) + format!("Call '{expr:?}' with [{exprs:?}]\n").as_str()
+            }
         }
     }
 }
@@ -788,7 +807,9 @@ impl TokenType {
             TokenType::True => (Some(Parser::bool), None, Precedence::Primary),
             TokenType::False => (Some(Parser::bool), None, Precedence::Primary),
             TokenType::Identifier => (Some(Parser::variable), None, Precedence::Primary),
-            TokenType::LeftParenthese => (Some(Parser::grouping), None, Precedence::Call),
+            TokenType::LeftParenthese => {
+                (Some(Parser::grouping), Some(Parser::call), Precedence::Call)
+            }
             TokenType::RightParenthese => (None, None, Precedence::None),
             TokenType::Greater
             | TokenType::GreaterEqual

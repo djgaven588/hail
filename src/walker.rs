@@ -1,5 +1,7 @@
+use std::{any::Any, sync::Arc};
+
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Location, Scope, Scoper,
+    Dynamic, ExecutionError, ExecutionErrorType, Executor, Location, Module, Scope, Scoper,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
     scanner::{Token, TokenType},
 };
@@ -15,16 +17,18 @@ pub struct ExecutionContext {
     scoper: Scoper,
 }
 
+impl Executor for ExecutionContext {}
+
 impl ExecutionContext {
-    pub fn new() -> ExecutionContext {
+    pub fn new(module: Arc<Module>) -> ExecutionContext {
         ExecutionContext {
-            scoper: Scoper::new(None),
+            scoper: Scoper::new(module, None),
         }
     }
 
-    pub fn new_with_scope(scope: Scope) -> ExecutionContext {
+    pub fn new_with_scope(module: Arc<Module>, scope: Scope) -> ExecutionContext {
         ExecutionContext {
-            scoper: Scoper::new(Some(scope)),
+            scoper: Scoper::new(module, Some(scope)),
         }
     }
 
@@ -213,6 +217,49 @@ impl ExecutionContext {
             Expr::Condition(expr, token, expr1) => self.conditional(token, expr, expr1),
             Expr::Variable(location, identifier) => self.variable(*location, identifier),
             Expr::Nil(_) => Ok(Dynamic::Nil),
+            Expr::Call(callee, params) => self.call(callee, params),
+        }
+    }
+
+    fn call(&mut self, expr: &Expr, params: &[Box<Expr>]) -> Result<Dynamic, ExecutionError> {
+        let callee = self.expression(expr)?;
+        let mut evaled_params = Vec::with_capacity(params.len());
+        for i in 0..params.len() {
+            evaled_params.push(self.expression(&params[i])?);
+        }
+
+        match callee {
+            Dynamic::NativeFunc(native_func_info) => {
+                if params.len() != native_func_info.signature.len() {
+                    return Err(ExecutionError::new(
+                        expr.get_location(),
+                        ExecutionErrorType::MismatchedSignature(
+                            native_func_info.param_info.clone(),
+                            evaled_params,
+                        ),
+                    ));
+                }
+
+                for i in 0..evaled_params.len() {
+                    if evaled_params[i].get_type() != native_func_info.signature[i] {
+                        return Err(ExecutionError::new(
+                            expr.get_location(),
+                            ExecutionErrorType::MismatchedSignature(
+                                native_func_info.param_info.clone(),
+                                evaled_params,
+                            ),
+                        ));
+                    }
+                }
+
+                (native_func_info.call)(self, evaled_params).map(|v| v.unwrap_or(Dynamic::Nil))
+            }
+            a => {
+                return Err(ExecutionError::new(
+                    expr.get_location(),
+                    ExecutionErrorType::NotAFunction(a),
+                ));
+            }
         }
     }
 

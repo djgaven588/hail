@@ -4,7 +4,13 @@ mod parser;
 mod scanner;
 mod walker;
 
-use std::{collections::HashMap, fs};
+use std::{
+    any::{Any, TypeId, type_name},
+    collections::HashMap,
+    fmt::Debug,
+    fs,
+    sync::Arc,
+};
 
 use crate::{
     parser::{AssignmentOp, BinaryOp, Parser, UnaryOp, VariableMutability},
@@ -12,8 +18,8 @@ use crate::{
 };
 
 pub fn run(script_name: String) {
-    benching::bench(&script_name);
-    return;
+    //benching::bench(&script_name);
+    //return;
 
     println!("Running: {script_name}");
     let source = fs::read_to_string(script_name + ".hail").expect("Script should be at location.");
@@ -40,10 +46,10 @@ pub fn run(script_name: String) {
 
     if let Some(stmts) = parser.get() {
         println!("Running walker...");
-        let result = walker::ExecutionContext::new().run(stmts);
+        let result = walker::ExecutionContext::new(library()).run(stmts);
         println!("Result: {result:?}");
 
-        let vm = machine::Vm::new(stmts);
+        let vm = machine::Vm::new(library(), stmts);
         println!("Running machine...");
         let result = vm.run();
         println!("Result: {result:?}");
@@ -55,19 +61,137 @@ pub fn run(script_name: String) {
      */
 }
 
+pub trait Scriptable {
+    fn to_dynamic(self) -> Dynamic;
+    fn from_dynamic(dynamic: Dynamic) -> Self;
+}
+
+impl Scriptable for f64 {
+    fn to_dynamic(self) -> Dynamic {
+        Dynamic::Float(self)
+    }
+
+    fn from_dynamic(dynamic: Dynamic) -> Self {
+        let Dynamic::Float(val) = dynamic else {
+            unreachable!();
+        };
+
+        val
+    }
+}
+
+impl Scriptable for i64 {
+    fn to_dynamic(self) -> Dynamic {
+        Dynamic::Integer(self)
+    }
+    fn from_dynamic(dynamic: Dynamic) -> Self {
+        let Dynamic::Integer(val) = dynamic else {
+            unreachable!();
+        };
+
+        val
+    }
+}
+
+impl Scriptable for String {
+    fn to_dynamic(self) -> Dynamic {
+        Dynamic::String(self)
+    }
+    fn from_dynamic(dynamic: Dynamic) -> Self {
+        let Dynamic::String(val) = dynamic else {
+            unreachable!();
+        };
+
+        val
+    }
+}
+
+impl Scriptable for bool {
+    fn to_dynamic(self) -> Dynamic {
+        Dynamic::Bool(self)
+    }
+    fn from_dynamic(dynamic: Dynamic) -> Self {
+        let Dynamic::Bool(val) = dynamic else {
+            unreachable!();
+        };
+
+        val
+    }
+}
+
+impl Scriptable for Box<Arc<NativeFuncInfo>> {
+    fn to_dynamic(self) -> Dynamic {
+        Dynamic::NativeFunc(self)
+    }
+    fn from_dynamic(dynamic: Dynamic) -> Self {
+        let Dynamic::NativeFunc(val) = dynamic else {
+            unreachable!();
+        };
+
+        val
+    }
+}
+
+pub fn library() -> Arc<Module> {
+    let mut module = Module::default();
+
+    module
+        .define(
+            "SOMETHING",
+            Box::new(Arc::new(NativeFuncInfo {
+                name: "SOMETHING".to_owned(),
+                signature: vec![TypeId::of::<String>()],
+                param_info: vec![type_name::<String>()],
+                call: |executor, params| {
+                    let arg = params.into_iter().next().unwrap();
+                    let arg = arg.unwrap_string();
+                    Ok(Some(Dynamic::String(format!(
+                        "Something was called! Param: {arg}"
+                    ))))
+                },
+            })),
+        )
+        .unwrap();
+
+    Arc::new(module)
+}
+
+#[derive(Default)]
+pub struct Module {
+    globals: HashMap<String, Dynamic>,
+}
+
+impl Module {
+    pub fn global(&self, name: &str) -> Option<&Dynamic> {
+        self.globals.get(name)
+    }
+
+    /// Define constants, functions, anything implementing ``Scripting`` that are made available to scripts
+    pub fn define<T: Scriptable>(&mut self, name: &str, value: T) -> Result<(), String> {
+        let Some(existing) = self.globals.insert(name.to_string(), value.to_dynamic()) else {
+            return Ok(());
+        };
+
+        Err(format!("'{name}' was occupied with '{existing:?}'"))
+    }
+}
+
 #[derive(Default)]
 pub struct Scope {
     variables: HashMap<String, VariableState>,
 }
 
-#[derive(Default)]
 struct Scoper {
+    module: Arc<Module>,
     scopes: Vec<Scope>,
 }
 
 impl Scoper {
-    pub fn new(scope: Option<Scope>) -> Scoper {
+    /// Create an execution scope with the provided library and initial scope
+    /// Generally a module will be provided, a scope is truly optional
+    pub fn new(module: Arc<Module>, scope: Option<Scope>) -> Scoper {
         Scoper {
+            module,
             scopes: vec![scope.unwrap_or_else(|| Scope::default())],
         }
     }
@@ -153,15 +277,30 @@ impl Scoper {
             }
         }
 
-        Err(ExecutionError::new(
-            location,
-            ExecutionErrorType::VariableUndefined(name.to_string()),
-        ))
+        let Some(global) = self.module.global(name) else {
+            return Err(ExecutionError::new(
+                location,
+                ExecutionErrorType::VariableUndefined(name.to_string()),
+            ));
+        };
+
+        Ok(global.clone())
     }
+}
+
+pub trait Executor {}
+
+#[derive(Debug)]
+pub struct NativeFuncInfo {
+    pub name: String,
+    pub signature: Vec<TypeId>,
+    pub param_info: Vec<&'static str>,
+    pub call: fn(&mut dyn Executor, Vec<Dynamic>) -> Result<Option<Dynamic>, ExecutionError>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Dynamic {
+    NativeFunc(Box<Arc<NativeFuncInfo>>),
     Bool(bool),
     Integer(i64),
     Float(f64),
@@ -170,6 +309,24 @@ pub enum Dynamic {
 }
 
 impl Dynamic {
+    pub const fn get_type(&self) -> TypeId {
+        match self {
+            Dynamic::NativeFunc(_) => TypeId::of::<Box<Arc<NativeFuncInfo>>>(),
+            Dynamic::Bool(_) => TypeId::of::<bool>(),
+            Dynamic::Integer(_) => TypeId::of::<i64>(),
+            Dynamic::Float(_) => TypeId::of::<f64>(),
+            Dynamic::String(_) => TypeId::of::<String>(),
+            Dynamic::Nil => TypeId::of::<()>(),
+        }
+    }
+
+    pub fn unwrap_into<T>(self) -> T
+    where
+        T: Scriptable,
+    {
+        T::from_dynamic(self)
+    }
+
     pub fn unwrap_integer(self) -> i64 {
         let Dynamic::Integer(val) = self else {
             unreachable!("Unwrap should be done carefully!");
@@ -218,6 +375,8 @@ enum ExecutionErrorType {
     RedefinedConstant,
     ExpectedBoolean,
     AssignmentOpInvalid(Dynamic, AssignmentOp, Dynamic),
+    NotAFunction(Dynamic),
+    MismatchedSignature(Vec<&'static str>, Vec<Dynamic>),
 }
 
 #[derive(Debug)]
