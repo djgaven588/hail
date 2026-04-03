@@ -19,6 +19,7 @@ impl ParseError {
 enum ParseErrorType {
     ExpectedClosingParenthese,
     ExpectedExpression,
+    ExpectedParameters,
     InvalidOperator,
     UnexpectedEndOfFile,
     UnexpectedToken,
@@ -88,8 +89,7 @@ impl Parser {
 
     fn declaration(&mut self) -> Option<Stmt> {
         let stmt = if self.try_match(&[TokenType::Fn]).is_some() {
-            todo!()
-            //self.function_declaration()
+            self.function_declaration()
         } else if self.try_match(&[TokenType::Let]).is_some() {
             self.var_declaration()
         } else if self.try_match(&[TokenType::Const]).is_some() {
@@ -111,6 +111,55 @@ impl Parser {
         }
 
         stmt
+    }
+
+    fn function_declaration(&mut self) -> Option<Stmt> {
+        let Some(name) = self.try_match(&[TokenType::Identifier]).cloned() else {
+            self.error(ParseErrorType::ExpectedIdentifier);
+            return None;
+        };
+
+        self.consume(
+            TokenType::LeftParenthese,
+            ParseErrorType::ExpectedParameters,
+        );
+
+        let mut parameters = vec![];
+
+        // Loop until we run out of parameters
+        loop {
+            // Check if this variable will be mutable, it's fine if it isn't.
+            let mutability: VariableMutability = if self.try_match(&[TokenType::Mut]).is_some() {
+                VariableMutability::Mutable
+            } else if self.try_match(&[TokenType::Const]).is_some() {
+                VariableMutability::Constant
+            } else {
+                VariableMutability::Immutable
+            };
+
+            // We *must* have an identifier
+            let Some(identifier) = self.try_match(&[TokenType::Identifier]) else {
+                break;
+            };
+
+            parameters.push((mutability, identifier.clone()));
+
+            // Remove trailing commas, we're done if there is none.
+            if self.try_match(&[TokenType::Comma]).is_none() {
+                break;
+            }
+        }
+
+        self.consume(
+            TokenType::RightParenthese,
+            ParseErrorType::ExpectedClosingParenthese,
+        );
+
+        self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
+
+        let body = self.block_statement()?;
+
+        Some(Stmt::Function(name, parameters, Box::new(body)))
     }
 
     fn const_declaration(&mut self) -> Option<Stmt> {
@@ -406,7 +455,7 @@ impl Parser {
                 break;
             }
 
-            params.push(Box::new(self.parse_precendence(Precedence::Primary)?));
+            params.push(Box::new(self.parse_precendence(Precedence::Assignment)?));
 
             // Try and remove the comma that follows
             let _ = self.try_match(&[TokenType::Comma]);
@@ -688,7 +737,7 @@ pub enum BinaryOp {
     BangEqual,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     // Name, initializer, mutable
     Variable(Token, Option<Box<Stmt>>, VariableMutability),
@@ -703,6 +752,8 @@ pub enum Stmt {
     If(Box<Stmt>, Box<Stmt>, Option<Box<Stmt>>),
     // Condition, body
     While(Box<Stmt>, Box<Stmt>),
+    // Name, parameter names (with mutability), body
+    Function(Token, Vec<(VariableMutability, Token)>, Box<Stmt>),
 }
 
 impl Stmt {
@@ -719,11 +770,12 @@ impl Stmt {
                 .get_location(),
             Stmt::If(expr, _, _) => expr.get_location(),
             Stmt::While(stmt, _) => stmt.get_location(),
+            Stmt::Function(token, _, _) => token.location,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Float(Location, f64),
     Integer(Location, i64),

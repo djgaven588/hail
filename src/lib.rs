@@ -6,20 +6,24 @@ mod walker;
 
 use std::{
     any::{Any, TypeId, type_name},
-    collections::HashMap,
     fmt::Debug,
     fs,
+    hash::Hash,
     sync::Arc,
 };
 
+use hashbrown::HashMap;
+
 use crate::{
-    parser::{AssignmentOp, BinaryOp, Parser, UnaryOp, VariableMutability},
+    parser::{AssignmentOp, BinaryOp, Parser, Stmt, UnaryOp, VariableMutability},
     scanner::Scanner,
 };
 
-pub fn run(script_name: String) {
-    //benching::bench(&script_name);
-    //return;
+pub fn run(script_name: String, is_bench: bool) {
+    if is_bench {
+        benching::bench(&script_name);
+        return;
+    }
 
     println!("Running: {script_name}");
     let source = fs::read_to_string(script_name + ".hail").expect("Script should be at location.");
@@ -176,14 +180,51 @@ impl Module {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VariableName {
+    hash: u64,
+    name: String,
+}
+
+impl Hash for VariableName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+    }
+}
+
+impl VariableName {
+    pub fn new(name: String) -> VariableName {
+        todo!()
+        /*
+        VariableName {
+            hash: name.hash(state);
+        } */
+    }
+}
+
 #[derive(Default)]
 pub struct Scope {
     variables: HashMap<String, VariableState>,
 }
 
+#[derive(Default)]
+struct Frame {
+    return_address: usize,
+    scopes: Vec<Scope>,
+}
+
+impl Frame {
+    fn new(scope: Scope, return_address: usize) -> Frame {
+        Self {
+            scopes: vec![scope],
+            return_address,
+        }
+    }
+}
+
 struct Scoper {
     module: Arc<Module>,
-    scopes: Vec<Scope>,
+    frames: Vec<Frame>,
 }
 
 impl Scoper {
@@ -192,16 +233,46 @@ impl Scoper {
     pub fn new(module: Arc<Module>, scope: Option<Scope>) -> Scoper {
         Scoper {
             module,
-            scopes: vec![scope.unwrap_or_else(|| Scope::default())],
+            frames: vec![Frame::new(scope.unwrap_or_else(|| Scope::default()), 0)],
         }
     }
 
+    /// Enter a new function frame
+    pub fn enter(&mut self, return_address: usize) {
+        self.frames
+            .push(Frame::new(Scope::default(), return_address));
+    }
+
+    // Exit a function frame
+    pub fn exit(&mut self) -> Option<usize> {
+        let return_address = self
+            .frames
+            .pop()
+            .expect("Frame should exist.")
+            .return_address;
+
+        // If we've removed the root frame, we're done.
+        if self.frames.is_empty() {
+            return None;
+        }
+
+        Some(return_address)
+    }
+
     pub fn push(&mut self, scope: Option<Scope>) {
-        self.scopes.push(scope.unwrap_or(Scope::default()));
+        self.frames
+            .last_mut()
+            .expect("Should always have a call frame")
+            .scopes
+            .push(scope.unwrap_or(Scope::default()));
     }
 
     pub fn pop(&mut self) {
-        self.scopes.pop();
+        self.frames
+            .last_mut()
+            .expect("Should always have a call frame")
+            .scopes
+            .pop();
     }
 
     pub fn define_variable(
@@ -213,20 +284,13 @@ impl Scoper {
     ) -> Result<(), ExecutionError> {
         // If it's a constant, make sure we're not bypassing the fact it's a constant by redefining it
         // Constants are still *scoped*, this is more of a "enforce good behavior" that can be removed if needed
-        let len = self.scopes.len();
-        for i in 0..len {
-            let i = len - i - 1;
-            if let Some(found) = self.scopes[i].variables.get_mut(name)
-                && found.mutability == VariableMutability::Constant
-            {
-                return Err(ExecutionError::new(
-                    location,
-                    ExecutionErrorType::RedefinedConstant,
-                ));
-            }
-        }
+        let frame = self
+            .frames
+            .last_mut()
+            .expect("Should always have a call frame");
 
-        self.scopes
+        frame
+            .scopes
             .last_mut()
             .expect("A scope should always exist.")
             .variables
@@ -240,13 +304,18 @@ impl Scoper {
         location: Location,
         modify: impl FnOnce(&mut VariableState, Location) -> Result<(), ExecutionError>,
     ) -> Result<(), ExecutionError> {
-        let len = self.scopes.len();
+        let frame = self
+            .frames
+            .last_mut()
+            .expect("Should always have a call frame");
+
+        let len = frame.scopes.len();
         for i in 0..len {
             // Reverse loop
             let i = len - i - 1;
 
             // Search for variable we can mutate
-            if let Some(found) = self.scopes[i].variables.get_mut(name) {
+            if let Some(found) = frame.scopes[i].variables.get_mut(name) {
                 if found.mutability != VariableMutability::Mutable {
                     return Err(ExecutionError::new(
                         location,
@@ -255,6 +324,31 @@ impl Scoper {
                 }
 
                 return modify(found, location);
+            }
+        }
+
+        // Check global
+        if self.frames.len() > 1 {
+            let frame = self
+                .frames
+                .first_mut()
+                .expect("Should always have a call frame");
+            let len = frame.scopes.len();
+            for i in 0..len {
+                // Reverse loop
+                let i = len - i - 1;
+
+                // Search for variable we can mutate
+                if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+                    if found.mutability != VariableMutability::Mutable {
+                        return Err(ExecutionError::new(
+                            location,
+                            ExecutionErrorType::VariableImmutable(name.to_string()),
+                        ));
+                    }
+
+                    return modify(found, location);
+                }
             }
         }
 
@@ -269,11 +363,33 @@ impl Scoper {
         name: &str,
         location: Location,
     ) -> Result<Dynamic, ExecutionError> {
-        let len = self.scopes.len();
-        for i in 0..len {
-            let i = len - i - 1;
-            if let Some(found) = self.scopes[i].variables.get_mut(name) {
-                return Ok(found.value.clone());
+        {
+            // Current Stack frame
+            let frame = self
+                .frames
+                .last_mut()
+                .expect("Should always have a call frame");
+            let len = frame.scopes.len();
+            for i in 0..len {
+                let i = len - i - 1;
+                if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+                    return Ok(found.value.clone());
+                }
+            }
+        }
+
+        if self.frames.len() > 1 {
+            // Global Stack frame
+            let frame = self
+                .frames
+                .first_mut()
+                .expect("Should always have a call frame");
+            let len = frame.scopes.len();
+            for i in 0..len {
+                let i = len - i - 1;
+                if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+                    return Ok(found.value.clone());
+                }
             }
         }
 
@@ -298,9 +414,40 @@ pub struct NativeFuncInfo {
     pub call: fn(&mut dyn Executor, Vec<Dynamic>) -> Result<Option<Dynamic>, ExecutionError>,
 }
 
+#[derive(Debug)]
+pub enum TempScuff {
+    FuncParse(Box<Stmt>),
+    FuncVM(usize),
+}
+
+impl TempScuff {
+    pub fn unwrap_parse(&self) -> &Box<Stmt> {
+        match self {
+            TempScuff::FuncParse(stmt) => stmt,
+            TempScuff::FuncVM(_) => todo!(),
+        }
+    }
+
+    pub fn unwrap_vm(&self) -> usize {
+        match self {
+            TempScuff::FuncParse(stmt) => todo!(),
+            TempScuff::FuncVM(pointer) => *pointer,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FuncInfo {
+    pub name: String,
+    pub param_info: Vec<(VariableMutability, String)>,
+    // TODO: This is a work around for the stack machine
+    pub call: TempScuff,
+}
+
 #[derive(Debug, Clone)]
 pub enum Dynamic {
     NativeFunc(Box<Arc<NativeFuncInfo>>),
+    Func(Box<Arc<FuncInfo>>),
     Bool(bool),
     Integer(i64),
     Float(f64),
@@ -312,6 +459,7 @@ impl Dynamic {
     pub const fn get_type(&self) -> TypeId {
         match self {
             Dynamic::NativeFunc(_) => TypeId::of::<Box<Arc<NativeFuncInfo>>>(),
+            Dynamic::Func(_) => TypeId::of::<Box<Arc<FuncInfo>>>(),
             Dynamic::Bool(_) => TypeId::of::<bool>(),
             Dynamic::Integer(_) => TypeId::of::<i64>(),
             Dynamic::Float(_) => TypeId::of::<f64>(),
@@ -372,11 +520,11 @@ enum ExecutionErrorType {
     DivideByZero,
     NoValue,
     UnexpectedReturningStatement,
-    RedefinedConstant,
     ExpectedBoolean,
     AssignmentOpInvalid(Dynamic, AssignmentOp, Dynamic),
     NotAFunction(Dynamic),
-    MismatchedSignature(Vec<&'static str>, Vec<Dynamic>),
+    MismatchedNativeSignature(Vec<&'static str>, Vec<Dynamic>),
+    MismatchedSignature(Vec<String>, Vec<Dynamic>),
 }
 
 #[derive(Debug)]

@@ -1,0 +1,15 @@
+const TARGET = 28;
+const REPEAT = 5;
+const ANSWER = 317811;
+
+fn fib(n) {
+	if n <= 1 {
+		n
+	} else {
+		fib(n - 1) + fib(n - 2)
+	}
+}
+
+for (let mut i = 0; i < REPEAT; i += 1;) {
+	print fib(TARGET);
+}

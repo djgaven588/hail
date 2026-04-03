@@ -1,7 +1,8 @@
 use std::{any::Any, sync::Arc};
 
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Executor, Location, Module, Scope, Scoper,
+    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scope,
+    Scoper, TempScuff, VariableState,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
     scanner::{Token, TokenType},
 };
@@ -168,6 +169,21 @@ impl ExecutionContext {
                     last = self.statement(body)?;
                 }
             }
+            Stmt::Function(name, params, block) => {
+                self.scoper.define_variable(
+                    &name.lexeme,
+                    VariableMutability::Constant,
+                    Dynamic::Func(Box::new(Arc::new(FuncInfo {
+                        name: name.lexeme.to_string(),
+                        param_info: params
+                            .iter()
+                            .map(|v| (v.0, v.1.lexeme.to_string()))
+                            .collect(),
+                        call: TempScuff::FuncParse(block.clone()),
+                    }))),
+                    name.location,
+                )?;
+            }
         };
 
         Ok(last)
@@ -233,7 +249,7 @@ impl ExecutionContext {
                 if params.len() != native_func_info.signature.len() {
                     return Err(ExecutionError::new(
                         expr.get_location(),
-                        ExecutionErrorType::MismatchedSignature(
+                        ExecutionErrorType::MismatchedNativeSignature(
                             native_func_info.param_info.clone(),
                             evaled_params,
                         ),
@@ -244,7 +260,7 @@ impl ExecutionContext {
                     if evaled_params[i].get_type() != native_func_info.signature[i] {
                         return Err(ExecutionError::new(
                             expr.get_location(),
-                            ExecutionErrorType::MismatchedSignature(
+                            ExecutionErrorType::MismatchedNativeSignature(
                                 native_func_info.param_info.clone(),
                                 evaled_params,
                             ),
@@ -253,6 +269,52 @@ impl ExecutionContext {
                 }
 
                 (native_func_info.call)(self, evaled_params).map(|v| v.unwrap_or(Dynamic::Nil))
+            }
+            Dynamic::Func(func_info) => {
+                if params.len() != func_info.param_info.len() {
+                    return Err(ExecutionError::new(
+                        expr.get_location(),
+                        ExecutionErrorType::MismatchedSignature(
+                            func_info
+                                .param_info
+                                .iter()
+                                .map(|v| v.1.to_string())
+                                .collect(),
+                            evaled_params,
+                        ),
+                    ));
+                }
+
+                // Push variables into a new frame with a new scope
+                let mut evaled_params = evaled_params.into_iter();
+
+                // We don't care about a return address, we're an AST walker.
+                self.scoper.enter(0);
+
+                // Stuff params
+                for i in 0..params.len() {
+                    let (mutability, name) = &func_info.param_info[i];
+                    self.scoper.define_variable(
+                        &name,
+                        *mutability,
+                        evaled_params.next().unwrap(),
+                        params[i].get_location(),
+                    )?;
+                }
+
+                // Execute
+                let result = self.statement(func_info.call.unwrap_parse())?;
+
+                // Dump the garbage
+                self.scoper.exit();
+
+                let result = match result {
+                    StmtResult::None => return Ok(Dynamic::Nil),
+                    StmtResult::Value(dynamic) => dynamic,
+                    StmtResult::Return(dynamic) => dynamic,
+                };
+
+                Ok(result)
             }
             a => {
                 return Err(ExecutionError::new(

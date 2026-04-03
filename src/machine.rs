@@ -1,7 +1,10 @@
 use std::{any::Any, sync::Arc};
 
+use hashbrown::HashMap;
+
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Executor, Location, Module, Scope, Scoper,
+    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scope,
+    Scoper, TempScuff,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
@@ -42,6 +45,7 @@ enum InstructionType {
     // Manage stack
     PushScope,
     PopScope,
+    Return,
 
     // Call a function with X parameters
     Call(usize),
@@ -49,6 +53,7 @@ enum InstructionType {
 
 pub struct Vm {
     program: Vec<Instruction>,
+    functions: HashMap<String, usize>,
     module: Arc<Module>,
 }
 
@@ -56,6 +61,7 @@ impl Default for Vm {
     fn default() -> Self {
         Self {
             program: Default::default(),
+            functions: Default::default(),
             module: Arc::new(Module::default()),
         }
     }
@@ -65,15 +71,16 @@ impl Vm {
     pub fn new(module: Arc<Module>, stmts: &[Stmt]) -> Vm {
         let mut vm = Vm {
             program: vec![],
+            functions: Default::default(),
             module,
         };
 
         vm.statements(stmts);
 
-        //println!("VM Instructions:");
-        //for instruction in &vm.program {
-        //    println!("{instruction:?}");
-        //}
+        // println!("VM Instructions:");
+        // for (i, instruction) in vm.program.iter().enumerate() {
+        //     println!("[{i}] {instruction:?}");
+        // }
 
         vm
     }
@@ -113,7 +120,16 @@ impl Vm {
                     InstructionType::Print,
                 ));
             }
-            Stmt::Return(location, stmt) => todo!(),
+            Stmt::Return(location, stmt) => {
+                if let Some(stmt) = stmt {
+                    // Push value to stack
+                    self.statement(stmt);
+                }
+
+                // Return
+                self.program
+                    .push(Instruction::new(*location, InstructionType::Return));
+            }
             Stmt::Assign(name, op, stmt) => {
                 // Push value to stack
                 self.statement(stmt);
@@ -206,6 +222,61 @@ impl Vm {
                 self.program[jump_instruction].value =
                     InstructionType::JumpOnFalse(next_instruction);
             }
+            Stmt::Function(token, params, stmt) => {
+                // Mark where this begins
+                let const_index = self.program.len();
+
+                // If we hit this function without calling it, setup a variable and go around
+                self.program.push(Instruction::new(
+                    stmt.get_location(),
+                    // Temp nil
+                    InstructionType::Constant(Dynamic::Nil),
+                ));
+
+                self.program.push(Instruction::new(
+                    stmt.get_location(),
+                    InstructionType::DefineVariable(
+                        token.lexeme.to_string(),
+                        true,
+                        VariableMutability::Constant,
+                    ),
+                ));
+
+                // Setup an instruction to jump around, it'll need a value later
+                let jump_over = self.program.len();
+                self.program.push(Instruction::new(
+                    stmt.get_location(),
+                    InstructionType::Jump(0),
+                ));
+
+                // Finally set the initial value of this func no that we know where it actually begins to execute
+                let function_start = self.program.len();
+                self.program[const_index].value =
+                    InstructionType::Constant(Dynamic::Func(Box::new(Arc::new(FuncInfo {
+                        name: token.lexeme.to_string(),
+                        param_info: params
+                            .iter()
+                            .map(|v| (v.0, v.1.lexeme.to_string()))
+                            .collect(),
+                        // TODO: This shouldn't be here, check Dynamic
+                        call: TempScuff::FuncVM(function_start),
+                    }))));
+
+                //todo!("Track global functions");
+                //self.functions.insert(token.lexeme.to_string(), v)
+
+                // The body of the function
+                self.statement(stmt);
+
+                // Make sure we jump back
+                self.program.push(Instruction::new(
+                    stmt.get_location(),
+                    InstructionType::Return,
+                ));
+
+                // Modify previous instruction to go to the end
+                self.program[jump_over].value = InstructionType::Jump(self.program.len());
+            }
         }
     }
 
@@ -295,6 +366,7 @@ struct VmContext {
     stack: Vec<Dynamic>,
     counter: usize,
     location: Location,
+    last_produced: bool,
 }
 
 impl Executor for VmContext {}
@@ -306,16 +378,21 @@ impl VmContext {
             stack: vec![],
             counter: 0,
             location: Location::default(),
+            last_produced: false,
         }
     }
 
     fn run(mut self, program: &[Instruction]) -> Result<Option<Dynamic>, ExecutionError> {
         while let Some(instruction) = program.get(self.counter) {
-            //println!("Instruction: {instruction:?}");
+            //println!("[{}] {instruction:?} :: {:?}", self.counter, self.stack);
             self.location = instruction.location;
+            let mut last_produced = false;
             match &instruction.value {
                 InstructionType::Print => println!("Print: {:?}", self.stack.pop().unwrap()),
-                InstructionType::Constant(dynamic) => self.stack.push(dynamic.clone()),
+                InstructionType::Constant(dynamic) => {
+                    self.stack.push(dynamic.clone());
+                    last_produced = true;
+                }
                 InstructionType::DefineVariable(name, initialized, mutability) => {
                     self.scoper.define_variable(
                         &name,
@@ -328,13 +405,19 @@ impl VmContext {
                         instruction.location,
                     )?;
                 }
-                InstructionType::Unary(op) => self.unary_op(op),
-                InstructionType::Binary(op) => {
-                    self.binary_op(op);
+                InstructionType::Unary(op) => {
+                    self.unary_op(op)?;
+                    last_produced = true;
                 }
-                InstructionType::Variable(name) => self
-                    .stack
-                    .push(self.scoper.get_variable(name, self.location)?),
+                InstructionType::Binary(op) => {
+                    self.binary_op(op)?;
+                    last_produced = true;
+                }
+                InstructionType::Variable(name) => {
+                    self.stack
+                        .push(self.scoper.get_variable(name, self.location)?);
+                    last_produced = true;
+                }
                 InstructionType::ModifyVariable(name, op) => {
                     self.assign(name, *op)?;
                 }
@@ -355,7 +438,14 @@ impl VmContext {
                     continue;
                 }
                 InstructionType::PushScope => self.scoper.push(None),
-                InstructionType::PopScope => self.scoper.pop(),
+                InstructionType::PopScope => {
+                    self.scoper.pop();
+
+                    // Carry through the value production so we can use the return.
+                    if self.last_produced {
+                        last_produced = true;
+                    }
+                }
                 InstructionType::Call(params) => {
                     // Snack on the stack
                     let params = self.stack.split_off(self.stack.len() - params);
@@ -366,7 +456,7 @@ impl VmContext {
                             if params.len() != native_func_info.signature.len() {
                                 return Err(ExecutionError::new(
                                     self.location,
-                                    ExecutionErrorType::MismatchedSignature(
+                                    ExecutionErrorType::MismatchedNativeSignature(
                                         native_func_info.param_info.clone(),
                                         params,
                                     ),
@@ -377,7 +467,7 @@ impl VmContext {
                                 if params[i].get_type() != native_func_info.signature[i] {
                                     return Err(ExecutionError::new(
                                         self.location,
-                                        ExecutionErrorType::MismatchedSignature(
+                                        ExecutionErrorType::MismatchedNativeSignature(
                                             native_func_info.param_info.clone(),
                                             params,
                                         ),
@@ -386,10 +476,39 @@ impl VmContext {
                             }
 
                             // Execute the function and conditionally push to the stack
-                            // TODO: Is this correct? Or should Nil return?
                             if let Some(val) = (native_func_info.call)(&mut self, params)? {
+                                last_produced = true;
                                 self.stack.push(val);
                             }
+                        }
+                        Dynamic::Func(func) => {
+                            if params.len() != func.param_info.len() {
+                                return Err(ExecutionError::new(
+                                    self.location,
+                                    ExecutionErrorType::MismatchedSignature(
+                                        func.param_info.iter().map(|v| v.1.to_string()).collect(),
+                                        params,
+                                    ),
+                                ));
+                            }
+
+                            // Prepare to return
+                            self.scoper.enter(self.counter);
+
+                            // Push params
+                            let mut params = params.into_iter();
+                            for i in 0..params.len() {
+                                let (mutability, name) = &func.param_info[i];
+                                self.scoper.define_variable(
+                                    name,
+                                    *mutability,
+                                    params.next().unwrap(),
+                                    self.location,
+                                )?;
+                            }
+
+                            // Good luck soldier
+                            self.counter = func.call.unwrap_vm();
                         }
                         a => {
                             return Err(ExecutionError::new(
@@ -399,8 +518,23 @@ impl VmContext {
                         }
                     }
                 }
+                InstructionType::Return => {
+                    let Some(return_address) = self.scoper.exit() else {
+                        // We're out!
+                        break;
+                    };
+
+                    // Good luck friend
+                    self.counter = return_address;
+
+                    // Carry through the value production so we can use the return.
+                    if self.last_produced {
+                        last_produced = true;
+                    }
+                }
             }
 
+            self.last_produced = last_produced;
             self.counter += 1;
         }
 
@@ -470,16 +604,32 @@ impl VmContext {
             })
     }
 
-    fn unary_op(&mut self, op: &UnaryOp) {
+    fn unary_op(&mut self, op: &UnaryOp) -> Result<(), ExecutionError> {
+        if !self.last_produced {
+            return Err(ExecutionError::new(
+                self.location,
+                ExecutionErrorType::NoValue,
+            ));
+        }
+
         match (op, self.stack.last_mut().unwrap()) {
             (UnaryOp::Negate, Dynamic::Integer(value)) => *value = -*value,
             (UnaryOp::Negate, Dynamic::Float(value)) => *value = -*value,
             (UnaryOp::Invert, Dynamic::Bool(value)) => *value = !*value,
             a => unimplemented!("Compile error: {a:?}"),
         }
+
+        Ok(())
     }
 
-    fn binary_op(&mut self, op: &BinaryOp) {
+    fn binary_op(&mut self, op: &BinaryOp) -> Result<(), ExecutionError> {
+        if !self.last_produced {
+            return Err(ExecutionError::new(
+                self.location,
+                ExecutionErrorType::NoValue,
+            ));
+        }
+
         let var_b = self.stack.pop().unwrap();
         let mut var_a = self.stack.last_mut().unwrap();
 
@@ -493,6 +643,7 @@ impl VmContext {
                 Dynamic::String(val) => *a += &val,
                 Dynamic::Nil => *a += "Nil",
                 Dynamic::NativeFunc(func_info) => unimplemented!("Compile error: {func_info:?}"),
+                Dynamic::Func(func_info) => unimplemented!("Compile error: {func_info:?}"),
             },
             (BinaryOp::Minus, Dynamic::Integer(a), Dynamic::Integer(b)) => *a -= b,
             (BinaryOp::Minus, Dynamic::Float(a), Dynamic::Float(b)) => *a -= b,
@@ -556,5 +707,7 @@ impl VmContext {
             (BinaryOp::BangEqual, a, Dynamic::Nil) => **a = Dynamic::Bool(&Dynamic::Nil != *a),
             (op, a, b) => unimplemented!("Compile error: {op:?} {a:?} {b:?}"),
         }
+
+        Ok(())
     }
 }

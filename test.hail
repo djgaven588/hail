@@ -1,28 +1,6 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+fn my_func(a_var) {
+	"a_var: " + a_var
+}
 
 // Setup a mutable variable
 let mut my_var; // Nil without an initializer
@@ -54,7 +32,7 @@ let result = if second_var < 2.0 {
 	print "Greater!";
 	true
 } else {
-	print SOMETHING("A thing!");
+	print my_func("A thing!");
 	false
 };
 
