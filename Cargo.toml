@@ -3,6 +3,10 @@ name = "hail"
 version = "0.1.0"
 edition = "2024"
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 # Slow?
 #[profile.production]
 #inherits = "release"

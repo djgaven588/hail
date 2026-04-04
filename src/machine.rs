@@ -52,7 +52,8 @@ enum InstructionType {
 }
 
 pub struct Vm {
-    program: Vec<Instruction>,
+    program: Vec<InstructionType>,
+    debug: Vec<Location>,
     functions: HashMap<String, usize>,
     module: Arc<Module>,
 }
@@ -61,6 +62,7 @@ impl Default for Vm {
     fn default() -> Self {
         Self {
             program: Default::default(),
+            debug: Default::default(),
             functions: Default::default(),
             module: Arc::new(Module::default()),
         }
@@ -68,9 +70,10 @@ impl Default for Vm {
 }
 
 impl Vm {
-    pub fn new(module: Arc<Module>, stmts: &[Stmt]) -> Vm {
+    pub fn new(module: Arc<Module>, stmts: &[Stmt]) -> Arc<Vm> {
         let mut vm = Vm {
             program: vec![],
+            debug: vec![],
             functions: Default::default(),
             module,
         };
@@ -82,7 +85,18 @@ impl Vm {
         //     println!("[{i}] {instruction:?}");
         // }
 
-        vm
+        vm.into()
+    }
+
+    fn push_instruction(&mut self, location: Location, instruction: InstructionType) -> usize {
+        self.program.push(instruction);
+        self.debug.push(location);
+
+        self.program.len() - 1
+    }
+
+    fn modify_instruction(&mut self, index: usize, instruction: InstructionType) {
+        self.program[index] = instruction;
     }
 
     fn statements(&mut self, stmts: &[Stmt]) {
@@ -100,14 +114,14 @@ impl Vm {
                 }
 
                 // *Then* take from the stack
-                self.program.push(Instruction::new(
+                self.push_instruction(
                     token.location,
                     InstructionType::DefineVariable(
                         token.lexeme.clone(),
                         stmt.is_some(),
                         *variable_mutability,
                     ),
-                ));
+                );
             }
             Stmt::Expression(expr, _) => self.expression(expr),
             Stmt::Print(stmt) => {
@@ -115,10 +129,7 @@ impl Vm {
                 self.statement(stmt);
 
                 // Then print
-                self.program.push(Instruction::new(
-                    stmt.get_location(),
-                    InstructionType::Print,
-                ));
+                self.push_instruction(stmt.get_location(), InstructionType::Print);
             }
             Stmt::Return(location, stmt) => {
                 if let Some(stmt) = stmt {
@@ -127,31 +138,30 @@ impl Vm {
                 }
 
                 // Return
-                self.program
-                    .push(Instruction::new(*location, InstructionType::Return));
+                self.push_instruction(*location, InstructionType::Return);
             }
             Stmt::Assign(name, op, stmt) => {
                 // Push value to stack
                 self.statement(stmt);
 
                 // Update variable
-                self.program.push(Instruction::new(
+                self.push_instruction(
                     stmt.get_location(),
                     InstructionType::ModifyVariable(name.to_string(), *op),
-                ));
+                );
             }
             Stmt::Block(stmts) => {
-                self.program.push(Instruction::new(
+                self.push_instruction(
                     stmts.first().unwrap().get_location(),
                     InstructionType::PushScope,
-                ));
+                );
 
                 self.statements(stmts);
 
-                self.program.push(Instruction::new(
+                self.push_instruction(
                     stmts.last().unwrap().get_location(),
                     InstructionType::PopScope,
-                ));
+                );
             }
             Stmt::If(stmt, stmt1, stmt2) => {
                 // Evaluate condition
@@ -159,11 +169,11 @@ impl Vm {
 
                 // Check if we need to go to the end
                 let else_jump = self.program.len();
-                self.program.push(Instruction::new(
+                self.push_instruction(
                     stmt.get_location(),
                     // Initialize to 0 as we don't know how long this is going to be
                     InstructionType::JumpOnFalse(0),
-                ));
+                );
 
                 // If we don't jump, evaluate the if
                 self.statement(stmt1);
@@ -171,26 +181,27 @@ impl Vm {
                 // Check if we need to go to the end
                 if let Some(stmt2) = stmt2 {
                     // If we've got an else, jump over it
-                    let end_jump_instruction = self.program.len();
-                    self.program.push(Instruction::new(
+                    let end_jump_instruction = self.push_instruction(
                         stmt.get_location(),
                         // Initialize to 0 as we don't know how long this is going to be
                         InstructionType::Jump(0),
-                    ));
+                    );
 
                     let else_begin = self.program.len();
-                    self.program[else_jump].value = InstructionType::JumpOnFalse(else_begin);
+                    self.modify_instruction(else_jump, InstructionType::JumpOnFalse(else_begin));
 
                     // Else
                     self.statement(stmt2);
 
                     // Update original jump over to refer to the end of this statement
                     let else_end_instruction = self.program.len();
-                    self.program[end_jump_instruction].value =
-                        InstructionType::Jump(else_end_instruction);
+                    self.modify_instruction(
+                        end_jump_instruction,
+                        InstructionType::Jump(else_end_instruction),
+                    );
                 } else {
                     let if_end = self.program.len();
-                    self.program[else_jump].value = InstructionType::JumpOnFalse(if_end);
+                    self.modify_instruction(else_jump, InstructionType::JumpOnFalse(if_end));
                 }
             }
             Stmt::While(stmt, stmt1) => {
@@ -201,57 +212,51 @@ impl Vm {
                 self.statement(stmt);
 
                 // Check if we need to go to the end
-                let jump_instruction = self.program.len();
-                self.program.push(Instruction::new(
+                let jump_instruction = self.push_instruction(
                     stmt.get_location(),
                     // Initialize to 0 as we don't know how long this is going to be
                     InstructionType::JumpOnFalse(0),
-                ));
+                );
 
                 // Body
                 self.statement(stmt1);
 
                 // Go back to the beginning of the loop
-                self.program.push(Instruction::new(
-                    stmt.get_location(),
-                    InstructionType::Jump(loop_start),
-                ));
+                self.push_instruction(stmt.get_location(), InstructionType::Jump(loop_start));
 
                 // Modify previous instruction with final address
                 let next_instruction = self.program.len();
-                self.program[jump_instruction].value =
-                    InstructionType::JumpOnFalse(next_instruction);
+                self.modify_instruction(
+                    jump_instruction,
+                    InstructionType::JumpOnFalse(next_instruction),
+                );
             }
             Stmt::Function(token, params, stmt) => {
                 // Mark where this begins
-                let const_index = self.program.len();
-
                 // If we hit this function without calling it, setup a variable and go around
-                self.program.push(Instruction::new(
+                let const_index = self.push_instruction(
                     stmt.get_location(),
                     // Temp nil
                     InstructionType::Constant(Dynamic::Nil),
-                ));
+                );
 
-                self.program.push(Instruction::new(
+                self.push_instruction(
                     stmt.get_location(),
                     InstructionType::DefineVariable(
                         token.lexeme.to_string(),
                         true,
                         VariableMutability::Constant,
                     ),
-                ));
+                );
 
                 // Setup an instruction to jump around, it'll need a value later
-                let jump_over = self.program.len();
-                self.program.push(Instruction::new(
-                    stmt.get_location(),
-                    InstructionType::Jump(0),
-                ));
+                let jump_over =
+                    self.push_instruction(stmt.get_location(), InstructionType::Jump(0));
 
                 // Finally set the initial value of this func no that we know where it actually begins to execute
                 let function_start = self.program.len();
-                self.program[const_index].value =
+                self.modify_instruction(
+                    const_index,
                     InstructionType::Constant(Dynamic::Func(Box::new(Arc::new(FuncInfo {
                         name: token.lexeme.to_string(),
                         param_info: params
@@ -260,7 +265,8 @@ impl Vm {
                             .collect(),
                         // TODO: This shouldn't be here, check Dynamic
                         call: TempScuff::FuncVM(function_start),
-                    }))));
+                    })))),
+                );
 
                 //todo!("Track global functions");
                 //self.functions.insert(token.lexeme.to_string(), v)
@@ -269,47 +275,42 @@ impl Vm {
                 self.statement(stmt);
 
                 // Make sure we jump back
-                self.program.push(Instruction::new(
-                    stmt.get_location(),
-                    InstructionType::Return,
-                ));
+                self.push_instruction(stmt.get_location(), InstructionType::Return);
 
                 // Modify previous instruction to go to the end
-                self.program[jump_over].value = InstructionType::Jump(self.program.len());
+                self.modify_instruction(jump_over, InstructionType::Jump(self.program.len()));
             }
         }
     }
 
     fn expression(&mut self, expr: &Expr) {
         match expr {
-            Expr::Float(location, value) => self.program.push(Instruction::new(
-                *location,
-                InstructionType::Constant(Dynamic::Float(*value)),
-            )),
-            Expr::Integer(location, value) => self.program.push(Instruction::new(
-                *location,
-                InstructionType::Constant(Dynamic::Integer(*value)),
-            )),
-            Expr::Bool(location, value) => self.program.push(Instruction::new(
-                *location,
-                InstructionType::Constant(Dynamic::Bool(*value)),
-            )),
-            Expr::String(location, value) => self.program.push(Instruction::new(
-                *location,
-                InstructionType::Constant(Dynamic::String(value.clone())),
-            )),
-            Expr::Nil(location) => self.program.push(Instruction::new(
-                *location,
-                InstructionType::Constant(Dynamic::Nil),
-            )),
+            Expr::Float(location, value) => {
+                self.push_instruction(*location, InstructionType::Constant(Dynamic::Float(*value)));
+            }
+            Expr::Integer(location, value) => {
+                self.push_instruction(
+                    *location,
+                    InstructionType::Constant(Dynamic::Integer(*value)),
+                );
+            }
+            Expr::Bool(location, value) => {
+                self.push_instruction(*location, InstructionType::Constant(Dynamic::Bool(*value)));
+            }
+            Expr::String(location, value) => {
+                self.push_instruction(
+                    *location,
+                    InstructionType::Constant(Dynamic::String(value.clone())),
+                );
+            }
+            Expr::Nil(location) => {
+                self.push_instruction(*location, InstructionType::Constant(Dynamic::Nil));
+            }
             Expr::Unary(op, expr) => {
                 // Push expression to stack
                 self.expression(expr);
 
-                self.program.push(Instruction::new(
-                    expr.get_location(),
-                    InstructionType::Unary(*op),
-                ));
+                self.push_instruction(expr.get_location(), InstructionType::Unary(*op));
             }
             Expr::Binary(expr, op, expr1) => {
                 // Push A to stack
@@ -318,16 +319,10 @@ impl Vm {
                 self.expression(expr1);
 
                 // Operate
-                self.program.push(Instruction::new(
-                    expr.get_location(),
-                    InstructionType::Binary(*op),
-                ));
+                self.push_instruction(expr.get_location(), InstructionType::Binary(*op));
             }
             Expr::Variable(location, identifier) => {
-                self.program.push(Instruction::new(
-                    *location,
-                    InstructionType::Variable(identifier.to_string()),
-                ));
+                self.push_instruction(*location, InstructionType::Variable(identifier.to_string()));
             }
             Expr::Condition(expr, token, expr1) => {
                 // Push A to stack (it's always evaluated)
@@ -348,16 +343,13 @@ impl Vm {
 
                 // Tell it we want to call the callee with X params
                 // TODO: Could this be ignored if this is all type checked?
-                self.program.push(Instruction::new(
-                    callee.get_location(),
-                    InstructionType::Call(params.len()),
-                ));
+                self.push_instruction(callee.get_location(), InstructionType::Call(params.len()));
             }
         }
     }
 
-    pub fn run(&self) -> Result<Option<Dynamic>, ExecutionError> {
-        VmContext::new(self.module.clone(), None).run(&self.program)
+    pub fn run(vm: &Arc<Vm>) -> Result<Option<Dynamic>, ExecutionError> {
+        VmContext::new(&vm, None).run(&vm)
     }
 }
 
@@ -365,29 +357,26 @@ struct VmContext {
     scoper: Scoper,
     stack: Vec<Dynamic>,
     counter: usize,
-    location: Location,
     last_produced: bool,
 }
 
 impl Executor for VmContext {}
 
 impl VmContext {
-    fn new(module: Arc<Module>, scope: Option<Scope>) -> VmContext {
+    fn new(vm: &Arc<Vm>, scope: Option<Scope>) -> VmContext {
         VmContext {
-            scoper: Scoper::new(module, scope),
+            scoper: Scoper::new(vm.module.clone(), scope),
             stack: vec![],
             counter: 0,
-            location: Location::default(),
             last_produced: false,
         }
     }
 
-    fn run(mut self, program: &[Instruction]) -> Result<Option<Dynamic>, ExecutionError> {
-        while let Some(instruction) = program.get(self.counter) {
+    fn run(mut self, vm: &Arc<Vm>) -> Result<Option<Dynamic>, ExecutionError> {
+        while let Some(instruction) = vm.program.get(self.counter) {
             //println!("[{}] {instruction:?} :: {:?}", self.counter, self.stack);
-            self.location = instruction.location;
             let mut last_produced = false;
-            match &instruction.value {
+            match &instruction {
                 InstructionType::Print => println!("Print: {:?}", self.stack.pop().unwrap()),
                 InstructionType::Constant(dynamic) => {
                     self.stack.push(dynamic.clone());
@@ -402,24 +391,35 @@ impl VmContext {
                         } else {
                             Dynamic::Nil
                         },
-                        instruction.location,
                     )?;
                 }
                 InstructionType::Unary(op) => {
-                    self.unary_op(op)?;
+                    if !self.last_produced {
+                        return Err(ExecutionError::new(
+                            vm.debug[self.counter],
+                            ExecutionErrorType::NoValue,
+                        ));
+                    }
+                    self.unary_op(*op)?;
                     last_produced = true;
                 }
                 InstructionType::Binary(op) => {
-                    self.binary_op(op)?;
+                    if !self.last_produced {
+                        return Err(ExecutionError::new(
+                            vm.debug[self.counter],
+                            ExecutionErrorType::NoValue,
+                        ));
+                    }
+                    self.binary_op(*op)?;
                     last_produced = true;
                 }
                 InstructionType::Variable(name) => {
                     self.stack
-                        .push(self.scoper.get_variable(name, self.location)?);
+                        .push(self.scoper.get_variable(name, vm.debug[self.counter])?);
                     last_produced = true;
                 }
                 InstructionType::ModifyVariable(name, op) => {
-                    self.assign(name, *op)?;
+                    self.assign(vm, name, *op)?;
                 }
                 InstructionType::JumpOnFalse(address) => {
                     let Dynamic::Bool(cond) = self.stack.pop().unwrap() else {
@@ -455,7 +455,7 @@ impl VmContext {
                         Dynamic::NativeFunc(native_func_info) => {
                             if params.len() != native_func_info.signature.len() {
                                 return Err(ExecutionError::new(
-                                    self.location,
+                                    vm.debug[self.counter],
                                     ExecutionErrorType::MismatchedNativeSignature(
                                         native_func_info.param_info.clone(),
                                         params,
@@ -466,7 +466,7 @@ impl VmContext {
                             for i in 0..params.len() {
                                 if params[i].get_type() != native_func_info.signature[i] {
                                     return Err(ExecutionError::new(
-                                        self.location,
+                                        vm.debug[self.counter],
                                         ExecutionErrorType::MismatchedNativeSignature(
                                             native_func_info.param_info.clone(),
                                             params,
@@ -484,7 +484,7 @@ impl VmContext {
                         Dynamic::Func(func) => {
                             if params.len() != func.param_info.len() {
                                 return Err(ExecutionError::new(
-                                    self.location,
+                                    vm.debug[self.counter],
                                     ExecutionErrorType::MismatchedSignature(
                                         func.param_info.iter().map(|v| v.1.to_string()).collect(),
                                         params,
@@ -503,7 +503,6 @@ impl VmContext {
                                     name,
                                     *mutability,
                                     params.next().unwrap(),
-                                    self.location,
                                 )?;
                             }
 
@@ -512,7 +511,7 @@ impl VmContext {
                         }
                         a => {
                             return Err(ExecutionError::new(
-                                self.location,
+                                vm.debug[self.counter],
                                 ExecutionErrorType::NotAFunction(a),
                             ));
                         }
@@ -541,11 +540,11 @@ impl VmContext {
         Ok(self.stack.pop())
     }
 
-    fn assign(&mut self, name: &str, op: AssignmentOp) -> Result<(), ExecutionError> {
+    fn assign(&mut self, vm: &Arc<Vm>, name: &str, op: AssignmentOp) -> Result<(), ExecutionError> {
         let value = self.stack.pop().unwrap();
 
         self.scoper
-            .mut_variable(name, self.location, move |variable, location| {
+            .mut_variable(name, vm.debug[self.counter], move |variable, location| {
                 if op == AssignmentOp::Equal {
                     variable.value = value;
                     return Ok(());
@@ -604,14 +603,7 @@ impl VmContext {
             })
     }
 
-    fn unary_op(&mut self, op: &UnaryOp) -> Result<(), ExecutionError> {
-        if !self.last_produced {
-            return Err(ExecutionError::new(
-                self.location,
-                ExecutionErrorType::NoValue,
-            ));
-        }
-
+    fn unary_op(&mut self, op: UnaryOp) -> Result<(), ExecutionError> {
         match (op, self.stack.last_mut().unwrap()) {
             (UnaryOp::Negate, Dynamic::Integer(value)) => *value = -*value,
             (UnaryOp::Negate, Dynamic::Float(value)) => *value = -*value,
@@ -622,14 +614,7 @@ impl VmContext {
         Ok(())
     }
 
-    fn binary_op(&mut self, op: &BinaryOp) -> Result<(), ExecutionError> {
-        if !self.last_produced {
-            return Err(ExecutionError::new(
-                self.location,
-                ExecutionErrorType::NoValue,
-            ));
-        }
-
+    fn binary_op(&mut self, op: BinaryOp) -> Result<(), ExecutionError> {
         let var_b = self.stack.pop().unwrap();
         let mut var_a = self.stack.last_mut().unwrap();
 

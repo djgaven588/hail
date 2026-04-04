@@ -8,13 +8,14 @@ use std::{
     any::{Any, TypeId, type_name},
     fmt::Debug,
     fs,
-    hash::Hash,
+    hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
 };
 
 use hashbrown::HashMap;
 
 use crate::{
+    machine::Vm,
     parser::{AssignmentOp, BinaryOp, Parser, Stmt, UnaryOp, VariableMutability},
     scanner::Scanner,
 };
@@ -55,7 +56,7 @@ pub fn run(script_name: String, is_bench: bool) {
 
         let vm = machine::Vm::new(library(), stmts);
         println!("Running machine...");
-        let result = vm.run();
+        let result = Vm::run(&vm);
         println!("Result: {result:?}");
     } else {
         println!("Failed to get statements.");
@@ -193,18 +194,53 @@ impl Hash for VariableName {
 }
 
 impl VariableName {
-    pub fn new(name: String) -> VariableName {
-        todo!()
-        /*
+    pub fn new(name: String) -> Arc<VariableName> {
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
         VariableName {
-            hash: name.hash(state);
-        } */
+            hash: hasher.finish(),
+            name: name,
+        }
+        .into()
     }
 }
 
-#[derive(Default)]
 pub struct Scope {
-    variables: HashMap<String, VariableState>,
+    variables: Vec<(String, VariableState)>,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        // Default to 8 as we don't want to reallocate this.
+        Self {
+            variables: Vec::with_capacity(5),
+        }
+    }
+}
+
+impl Scope {
+    fn get_mut_variable(&mut self, name: &str) -> Option<&mut VariableState> {
+        // Reverse iterate check
+        for var in self.variables.iter_mut().rev() {
+            if var.0 == name {
+                return Some(&mut var.1);
+            }
+        }
+
+        None
+    }
+
+    fn insert_variable(&mut self, name: &str, variable: VariableState) {
+        // Reverse iterate check
+        for var in self.variables.iter_mut().rev() {
+            if var.0 == name {
+                var.1 = variable;
+                return;
+            }
+        }
+
+        self.variables.push((name.to_string(), variable));
+    }
 }
 
 #[derive(Default)]
@@ -215,8 +251,11 @@ struct Frame {
 
 impl Frame {
     fn new(scope: Scope, return_address: usize) -> Frame {
+        // Precache space
+        let mut scopes = Vec::with_capacity(3);
+        scopes.push(scope);
         Self {
-            scopes: vec![scope],
+            scopes,
             return_address,
         }
     }
@@ -280,7 +319,6 @@ impl Scoper {
         name: &str,
         mutability: VariableMutability,
         value: Dynamic,
-        location: Location,
     ) -> Result<(), ExecutionError> {
         // If it's a constant, make sure we're not bypassing the fact it's a constant by redefining it
         // Constants are still *scoped*, this is more of a "enforce good behavior" that can be removed if needed
@@ -293,8 +331,7 @@ impl Scoper {
             .scopes
             .last_mut()
             .expect("A scope should always exist.")
-            .variables
-            .insert(name.to_string(), VariableState::new(value, mutability));
+            .insert_variable(name, VariableState::new(value, mutability));
         Ok(())
     }
 
@@ -315,7 +352,7 @@ impl Scoper {
             let i = len - i - 1;
 
             // Search for variable we can mutate
-            if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+            if let Some(found) = frame.scopes[i].get_mut_variable(name) {
                 if found.mutability != VariableMutability::Mutable {
                     return Err(ExecutionError::new(
                         location,
@@ -339,7 +376,7 @@ impl Scoper {
                 let i = len - i - 1;
 
                 // Search for variable we can mutate
-                if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+                if let Some(found) = frame.scopes[i].get_mut_variable(name) {
                     if found.mutability != VariableMutability::Mutable {
                         return Err(ExecutionError::new(
                             location,
@@ -372,7 +409,7 @@ impl Scoper {
             let len = frame.scopes.len();
             for i in 0..len {
                 let i = len - i - 1;
-                if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+                if let Some(found) = frame.scopes[i].get_mut_variable(name) {
                     return Ok(found.value.clone());
                 }
             }
@@ -387,7 +424,7 @@ impl Scoper {
             let len = frame.scopes.len();
             for i in 0..len {
                 let i = len - i - 1;
-                if let Some(found) = frame.scopes[i].variables.get_mut(name) {
+                if let Some(found) = frame.scopes[i].get_mut_variable(name) {
                     return Ok(found.value.clone());
                 }
             }

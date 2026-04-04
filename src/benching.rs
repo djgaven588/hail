@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{library, scanner::Scanner};
+use crate::{library, machine::Vm, scanner::Scanner};
 
 pub fn bench(script_name: &str) {
     let iterations = 5;
@@ -29,7 +29,7 @@ pub fn bench(script_name: &str) {
 
     let rhai_time = rhai_bench(script_name, iterations);
     println!(
-        "Average Timings\n	Walker: {walker_time:.5} seconds\n	Machine: {machine_time:.5} seconds\n	Rhai: {rhai_time:.5} seconds",
+        "Average Timings Over {iterations} Loops\n	Walker: {walker_time:.5} seconds\n	Machine: {machine_time:.5} seconds\n	Rhai: {rhai_time:.5} seconds",
     );
 }
 
@@ -80,7 +80,7 @@ fn machine_bench(script_name: &str, iterations: usize) -> f64 {
 
     for _ in 0..iterations {
         let start = Instant::now();
-        let result = vm.run();
+        let result = Vm::run(&vm);
         let end = start.elapsed();
         //println!("Result: {result:?}");
         let time = end.as_secs_f64();

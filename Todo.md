@@ -1,0 +1,2 @@
+- [ ] Fix string based variable lookups
+- [ ] Move Position in instruction to seperate vec

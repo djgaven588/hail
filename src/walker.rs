@@ -181,7 +181,6 @@ impl ExecutionContext {
                             .collect(),
                         call: TempScuff::FuncParse(block.clone()),
                     }))),
-                    name.location,
                 )?;
             }
         };
@@ -216,7 +215,7 @@ impl ExecutionContext {
         };
 
         self.scoper
-            .define_variable(&token.lexeme, mutability, value, token.location)?;
+            .define_variable(&token.lexeme, mutability, value)?;
 
         Ok(())
     }
@@ -298,7 +297,6 @@ impl ExecutionContext {
                         &name,
                         *mutability,
                         evaled_params.next().unwrap(),
-                        params[i].get_location(),
                     )?;
                 }
 
