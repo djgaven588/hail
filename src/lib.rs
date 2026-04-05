@@ -5,7 +5,7 @@ mod scanner;
 mod walker;
 
 use std::{
-    any::{Any, TypeId, type_name},
+    any::{TypeId, type_name},
     fmt::Debug,
     fs,
     hash::{DefaultHasher, Hash, Hasher},
@@ -26,8 +26,9 @@ pub fn run(script_name: String, is_bench: bool) {
         return;
     }
 
-    println!("Running: {script_name}");
-    let source = fs::read_to_string(script_name + ".hail").expect("Script should be at location.");
+    let path = "./".to_string() + script_name.as_str() + ".hail";
+    println!("Running: {path}");
+    let source = fs::read_to_string(path).expect("Script should be at location.");
 
     let mut scanner = Scanner::new(source);
     scanner.scan();
@@ -205,113 +206,66 @@ impl VariableName {
     }
 }
 
-pub struct Scope {
-    variables: Vec<(String, VariableState)>,
-}
-
-impl Default for Scope {
-    fn default() -> Self {
-        // Default to 8 as we don't want to reallocate this.
-        Self {
-            variables: Vec::with_capacity(5),
-        }
-    }
-}
-
-impl Scope {
-    fn get_mut_variable(&mut self, name: &str) -> Option<&mut VariableState> {
-        // Reverse iterate check
-        for var in self.variables.iter_mut().rev() {
-            if var.0 == name {
-                return Some(&mut var.1);
-            }
-        }
-
-        None
-    }
-
-    fn insert_variable(&mut self, name: &str, variable: VariableState) {
-        // Reverse iterate check
-        for var in self.variables.iter_mut().rev() {
-            if var.0 == name {
-                var.1 = variable;
-                return;
-            }
-        }
-
-        self.variables.push((name.to_string(), variable));
-    }
-}
-
-#[derive(Default)]
-struct Frame {
-    return_address: usize,
-    scopes: Vec<Scope>,
-}
-
-impl Frame {
-    fn new(scope: Scope, return_address: usize) -> Frame {
-        // Precache space
-        let mut scopes = Vec::with_capacity(3);
-        scopes.push(scope);
-        Self {
-            scopes,
-            return_address,
-        }
-    }
-}
-
 struct Scoper {
     module: Arc<Module>,
-    frames: Vec<Frame>,
+
+    variables: Vec<(String, VariableState)>,
+    frame_returns: Vec<usize>,
+
+    frame_markers: Vec<usize>,
+    scope_markers: Vec<usize>,
 }
 
 impl Scoper {
     /// Create an execution scope with the provided library and initial scope
     /// Generally a module will be provided, a scope is truly optional
-    pub fn new(module: Arc<Module>, scope: Option<Scope>) -> Scoper {
+    pub fn new(module: Arc<Module>) -> Scoper {
         Scoper {
             module,
-            frames: vec![Frame::new(scope.unwrap_or_else(|| Scope::default()), 0)],
+
+            variables: Default::default(),
+            frame_returns: Default::default(),
+
+            frame_markers: Default::default(),
+            scope_markers: Default::default(),
         }
     }
 
     /// Enter a new function frame
     pub fn enter(&mut self, return_address: usize) {
-        self.frames
-            .push(Frame::new(Scope::default(), return_address));
+        // We don't need to scope as the frame marker is a scope boundary
+        self.frame_markers.push(self.variables.len());
+        self.frame_returns.push(return_address);
     }
 
-    // Exit a function frame
+    /// Exit a function frame
     pub fn exit(&mut self) -> Option<usize> {
-        let return_address = self
-            .frames
-            .pop()
-            .expect("Frame should exist.")
-            .return_address;
+        // Pop marker, may not exist.
+        if let Some(marker) = self.frame_markers.pop() {
+            // Get rid of everything that shouldn't be here anymore.
+            self.variables.truncate(marker);
 
-        // If we've removed the root frame, we're done.
-        if self.frames.is_empty() {
-            return None;
+            while let Some(scope) = self.scope_markers.last()
+                && *scope > marker
+            {
+                self.scope_markers.pop();
+            }
         }
 
-        Some(return_address)
+        // Return where we should go
+        self.frame_returns.pop()
     }
 
-    pub fn push(&mut self, scope: Option<Scope>) {
-        self.frames
-            .last_mut()
-            .expect("Should always have a call frame")
-            .scopes
-            .push(scope.unwrap_or(Scope::default()));
+    /// Push a scope level
+    pub fn push(&mut self) {
+        self.scope_markers.push(self.variables.len());
     }
 
+    /// Pop a scope level
     pub fn pop(&mut self) {
-        self.frames
-            .last_mut()
-            .expect("Should always have a call frame")
-            .scopes
-            .pop();
+        // Get rid of everything within this scope
+        let marker = self.scope_markers.pop().expect("Should have scope marker");
+        self.variables.truncate(marker);
     }
 
     pub fn define_variable(
@@ -320,18 +274,9 @@ impl Scoper {
         mutability: VariableMutability,
         value: Dynamic,
     ) -> Result<(), ExecutionError> {
-        // If it's a constant, make sure we're not bypassing the fact it's a constant by redefining it
-        // Constants are still *scoped*, this is more of a "enforce good behavior" that can be removed if needed
-        let frame = self
-            .frames
-            .last_mut()
-            .expect("Should always have a call frame");
+        self.variables
+            .push((name.to_string(), VariableState::new(value, mutability)));
 
-        frame
-            .scopes
-            .last_mut()
-            .expect("A scope should always exist.")
-            .insert_variable(name, VariableState::new(value, mutability));
         Ok(())
     }
 
@@ -341,51 +286,46 @@ impl Scoper {
         location: Location,
         modify: impl FnOnce(&mut VariableState, Location) -> Result<(), ExecutionError>,
     ) -> Result<(), ExecutionError> {
-        let frame = self
-            .frames
-            .last_mut()
-            .expect("Should always have a call frame");
+        let marker = *self.frame_markers.get(0).unwrap_or(&0);
 
-        let len = frame.scopes.len();
-        for i in 0..len {
-            // Reverse loop
-            let i = len - i - 1;
-
+        // Check current frame
+        let len = self.variables.len();
+        for i in (marker..len).rev() {
             // Search for variable we can mutate
-            if let Some(found) = frame.scopes[i].get_mut_variable(name) {
-                if found.mutability != VariableMutability::Mutable {
+            let variable = &mut self.variables[i];
+            if variable.0 != name {
+                continue;
+            }
+
+            if variable.1.mutability != VariableMutability::Mutable {
+                return Err(ExecutionError::new(
+                    location,
+                    ExecutionErrorType::VariableImmutable(name.to_string()),
+                ));
+            }
+
+            return modify(&mut variable.1, location);
+        }
+
+        // Check global frame
+        if marker != 0 {
+            let marker = *self.frame_markers.first().unwrap();
+
+            for i in (0..marker).rev() {
+                // Search for variable we can mutate
+                let variable = &mut self.variables[i];
+                if variable.0 != name {
+                    continue;
+                }
+
+                if variable.1.mutability != VariableMutability::Mutable {
                     return Err(ExecutionError::new(
                         location,
                         ExecutionErrorType::VariableImmutable(name.to_string()),
                     ));
                 }
 
-                return modify(found, location);
-            }
-        }
-
-        // Check global
-        if self.frames.len() > 1 {
-            let frame = self
-                .frames
-                .first_mut()
-                .expect("Should always have a call frame");
-            let len = frame.scopes.len();
-            for i in 0..len {
-                // Reverse loop
-                let i = len - i - 1;
-
-                // Search for variable we can mutate
-                if let Some(found) = frame.scopes[i].get_mut_variable(name) {
-                    if found.mutability != VariableMutability::Mutable {
-                        return Err(ExecutionError::new(
-                            location,
-                            ExecutionErrorType::VariableImmutable(name.to_string()),
-                        ));
-                    }
-
-                    return modify(found, location);
-                }
+                return modify(&mut variable.1, location);
             }
         }
 
@@ -400,33 +340,32 @@ impl Scoper {
         name: &str,
         location: Location,
     ) -> Result<Dynamic, ExecutionError> {
-        {
-            // Current Stack frame
-            let frame = self
-                .frames
-                .last_mut()
-                .expect("Should always have a call frame");
-            let len = frame.scopes.len();
-            for i in 0..len {
-                let i = len - i - 1;
-                if let Some(found) = frame.scopes[i].get_mut_variable(name) {
-                    return Ok(found.value.clone());
-                }
+        let marker = *self.frame_markers.get(0).unwrap_or(&0);
+
+        // Check current frame
+        let len = self.variables.len();
+        for i in (marker..len).rev() {
+            // Search for variable
+            let variable = &mut self.variables[i];
+            if variable.0 != name {
+                continue;
             }
+
+            return Ok(variable.1.value.clone());
         }
 
-        if self.frames.len() > 1 {
-            // Global Stack frame
-            let frame = self
-                .frames
-                .first_mut()
-                .expect("Should always have a call frame");
-            let len = frame.scopes.len();
-            for i in 0..len {
-                let i = len - i - 1;
-                if let Some(found) = frame.scopes[i].get_mut_variable(name) {
-                    return Ok(found.value.clone());
+        // Check global frame
+        if marker != 0 {
+            let marker = *self.frame_markers.first().unwrap();
+
+            for i in (0..marker).rev() {
+                // Search for variable we can mutate
+                let variable = &mut self.variables[i];
+                if variable.0 != name {
+                    continue;
                 }
+
+                return Ok(variable.1.value.clone());
             }
         }
 
@@ -579,6 +518,7 @@ impl ExecutionError {
     }
 }
 
+#[derive(Debug)]
 struct VariableState {
     value: Dynamic,
     mutability: VariableMutability,

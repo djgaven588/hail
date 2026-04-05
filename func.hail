@@ -1,0 +1,13 @@
+fn my_func(a) {
+	print "My func";
+	{
+		my_func_2(my_func_2(a)) + my_func_2(my_func_2(a))
+	}
+}
+
+fn my_func_2(a) {
+	print "My func 2";
+	a + 2
+}
+
+print my_func(5);

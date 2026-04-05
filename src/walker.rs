@@ -1,8 +1,8 @@
 use std::{any::Any, sync::Arc};
 
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scope,
-    Scoper, TempScuff, VariableState,
+    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scoper,
+    TempScuff,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
     scanner::{Token, TokenType},
 };
@@ -23,13 +23,7 @@ impl Executor for ExecutionContext {}
 impl ExecutionContext {
     pub fn new(module: Arc<Module>) -> ExecutionContext {
         ExecutionContext {
-            scoper: Scoper::new(module, None),
-        }
-    }
-
-    pub fn new_with_scope(module: Arc<Module>, scope: Scope) -> ExecutionContext {
-        ExecutionContext {
-            scoper: Scoper::new(module, Some(scope)),
+            scoper: Scoper::new(module),
         }
     }
 
@@ -96,7 +90,7 @@ impl ExecutionContext {
                 self.assign(name, *op, assignment).map(|_| Dynamic::Nil)?;
             }
             Stmt::Block(stmts) => {
-                self.scoper.push(None);
+                self.scoper.push();
 
                 last = self.statements(stmts)?;
 

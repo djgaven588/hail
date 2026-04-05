@@ -10,7 +10,8 @@ fn main() {
         return;
     }
     let _run_path = args.next().unwrap();
-    let is_bench = args.next().unwrap() == "--bench";
-    let script = args.next().unwrap();
+    let next = args.next().unwrap();
+    let is_bench = next == "--bench";
+    let script = if is_bench { args.next().unwrap() } else { next };
     run(script, is_bench);
 }

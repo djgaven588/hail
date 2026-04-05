@@ -1,10 +1,10 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use hashbrown::HashMap;
 
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scope,
-    Scoper, TempScuff,
+    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scoper,
+    TempScuff,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
@@ -80,10 +80,10 @@ impl Vm {
 
         vm.statements(stmts);
 
-        // println!("VM Instructions:");
-        // for (i, instruction) in vm.program.iter().enumerate() {
-        //     println!("[{i}] {instruction:?}");
-        // }
+        //println!("VM Instructions:");
+        //for (i, instruction) in vm.program.iter().enumerate() {
+        //    println!("[{i}] {instruction:?}");
+        //}
 
         vm.into()
     }
@@ -349,7 +349,7 @@ impl Vm {
     }
 
     pub fn run(vm: &Arc<Vm>) -> Result<Option<Dynamic>, ExecutionError> {
-        VmContext::new(&vm, None).run(&vm)
+        VmContext::new(&vm).run(&vm)
     }
 }
 
@@ -363,9 +363,9 @@ struct VmContext {
 impl Executor for VmContext {}
 
 impl VmContext {
-    fn new(vm: &Arc<Vm>, scope: Option<Scope>) -> VmContext {
+    fn new(vm: &Arc<Vm>) -> VmContext {
         VmContext {
-            scoper: Scoper::new(vm.module.clone(), scope),
+            scoper: Scoper::new(vm.module.clone()),
             stack: vec![],
             counter: 0,
             last_produced: false,
@@ -437,7 +437,7 @@ impl VmContext {
                     // Continue as we've modified the address ourselves
                     continue;
                 }
-                InstructionType::PushScope => self.scoper.push(None),
+                InstructionType::PushScope => self.scoper.push(),
                 InstructionType::PopScope => {
                     self.scoper.pop();
 
@@ -508,6 +508,8 @@ impl VmContext {
 
                             // Good luck soldier
                             self.counter = func.call.unwrap_vm();
+
+                            continue;
                         }
                         a => {
                             return Err(ExecutionError::new(
@@ -525,11 +527,7 @@ impl VmContext {
 
                     // Good luck friend
                     self.counter = return_address;
-
-                    // Carry through the value production so we can use the return.
-                    if self.last_produced {
-                        last_produced = true;
-                    }
+                    last_produced = self.last_produced;
                 }
             }
 
