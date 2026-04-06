@@ -5,7 +5,7 @@ use hashbrown::HashMap;
 use crate::{
     Dynamic, Location, Module,
     instructor::ProgramValue,
-    parser::{BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
+    parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
 struct Frame {
@@ -100,6 +100,8 @@ pub enum AStmt {
 
     // Slot info, name, value stmt
     SetVariable(Location, VariableSlot, String, Box<AStmt>),
+    // Slot info, name, assignment op, value stmt
+    AssignVariable(Location, VariableSlot, String, AssignmentOp, Box<AStmt>),
 
     // Condition, body
     While(Location, Box<AStmt>, Box<AStmt>),
@@ -115,6 +117,7 @@ impl AStmt {
             AStmt::While(location, _, _) => *location,
             AStmt::Block(location, _) => *location,
             AStmt::Print(location, _) => *location,
+            AStmt::AssignVariable(location, _, _, _, _) => *location,
         }
     }
 
@@ -125,6 +128,7 @@ impl AStmt {
             AStmt::Expression(_, aexpr) => Some(aexpr.get_value_type()),
             AStmt::While(_, _, astmt1) => astmt1.get_value_type(),
             AStmt::Block(_, astmts) => astmts.last().map(|v| v.get_value_type()).flatten(),
+            AStmt::AssignVariable(_, _, _, _, astmt) => astmt.get_value_type(),
         }
     }
 }
@@ -274,7 +278,13 @@ impl Constructor {
 
                 self.modify_variable(&slot, stmt_type);
 
-                AStmt::SetVariable(stmt.get_location(), slot, name.to_owned(), Box::new(stmt))
+                AStmt::AssignVariable(
+                    stmt.get_location(),
+                    slot,
+                    name.to_owned(),
+                    *op,
+                    Box::new(stmt),
+                )
             }
             Stmt::While(condition, body) => {
                 let condition = self.statement(condition)?;

@@ -8,7 +8,7 @@ use hashbrown::HashMap;
 use crate::{
     Location,
     constructor::{AExpr, AStmt, ConstantValue, ValueType, VariableSlot},
-    parser::{BinaryOp, UnaryOp},
+    parser::{AssignmentOp, BinaryOp, UnaryOp},
 };
 
 pub trait ProgramValue: 'static {
@@ -26,6 +26,8 @@ impl Debug for dyn ProgramValue {
 }
 
 impl<T: Clone + 'static> ProgramValue for T {
+    /// Clone a program value
+    /// NOTE: As this is usually wrapped in a box, it needs to have an .as_ref() to get inside right for typing
     fn clone_box(&self) -> Box<dyn ProgramValue> {
         Box::new(self.clone())
     }
@@ -56,10 +58,27 @@ pub struct Program {
 
 #[derive(Debug)]
 pub enum Instruction {
+    // Const index
     Constant(usize),
+    // Unary op on value
     Unary(fn(&mut Box<dyn ProgramValue>)),
+    // Binary op on values
     Binary(fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)),
+    // Pop a variable into a slot
     SetVariable(Box<VariableSlot>),
+    // Modify an existing variable
+    AssignVariable(
+        Box<(
+            VariableSlot,
+            fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
+        )>,
+    ),
+
+    // Push a variable onto the stack
+    GetVariable(Box<VariableSlot>),
+    // Jump address
+    JumpIfFalse(usize),
+    Jump(usize),
 }
 
 pub struct Instructor {
@@ -70,6 +89,8 @@ pub struct Instructor {
         (ValueType, BinaryOp, ValueType),
         fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
     >,
+    assign_ops:
+        HashMap<(ValueType, AssignmentOp), fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)>,
 }
 
 impl Instructor {
@@ -83,6 +104,7 @@ impl Instructor {
             constant_cache: vec![],
             unary_ops: get_unary_ops(),
             binary_ops: get_binary_ops(),
+            assign_ops: get_assign_ops(),
         }
     }
 
@@ -112,11 +134,64 @@ impl Instructor {
                     Instruction::SetVariable(Box::new(*variable_slot)),
                 );
             }
-            AStmt::While(location, astmt, astmt1) => todo!(),
-            AStmt::Expression(location, aexpr) => {
+            AStmt::AssignVariable(location, variable_slot, _, op, astmt) => {
+                // Push the variable to the stack
+                self.statement(astmt);
+
+                if op == &AssignmentOp::Equal {
+                    // Regular assignment
+                    self.push_instruction(
+                        *location,
+                        Instruction::SetVariable(Box::new(*variable_slot)),
+                    );
+                    return;
+                }
+
+                let assign_op = self
+                    .assign_ops
+                    .get(&(astmt.get_value_type().expect("Should have value type"), *op))
+                    .expect("Assign operator should be available?");
+
+                // Consume the variable into a slot
+                self.push_instruction(
+                    *location,
+                    Instruction::AssignVariable(Box::new((*variable_slot, *assign_op))),
+                );
+            }
+            AStmt::While(location, condition, body) => {
+                let start_instruction_count = self.program.instructions.len();
+                self.statement(condition);
+
+                let jump_if_count = self.program.instructions.len();
+                // Jump to after if we fail, we'll setup the address shortly
+                self.push_instruction(*location, Instruction::JumpIfFalse(0));
+
+                // The body
+                self.statement(body);
+
+                // Go back to condition
+                self.push_instruction(*location, Instruction::Jump(start_instruction_count));
+
+                // We're back for that jump instruction
+                // Go to the end
+                self.program.instructions[jump_if_count] =
+                    Instruction::JumpIfFalse(self.program.instructions.len());
+            }
+            AStmt::Expression(_, aexpr) => {
                 self.expression(aexpr);
             }
-            AStmt::Block(location, astmts) => todo!(),
+            AStmt::Block(_, astmts) => {
+                // Before, implementations would handle scoping for blocks explicitly
+                // Here though, with slots, it *shouldn't* need to as only frames matter
+                // So... No realloc of the variables..?
+
+                // Execute
+                for stmt in astmts {
+                    self.statement(stmt);
+                }
+
+                // What would be an exit scope
+            }
         }
     }
 
@@ -140,7 +215,6 @@ impl Instructor {
                 self.constant_cache.push(constant_value.clone());
 
                 let program_value = constant_value.to_program_value();
-                println!("Program const: {:?}", program_value.as_ref().type_id());
                 self.program.constants.push(program_value);
 
                 self.push_instruction(*location, Instruction::Constant(const_index));
@@ -166,7 +240,12 @@ impl Instructor {
 
                 self.push_instruction(*location, Instruction::Binary(*binary));
             }
-            AExpr::RetrieveVariable(location, variable_slot, _, value_type) => todo!(),
+            AExpr::RetrieveVariable(location, variable_slot, _, _) => {
+                self.push_instruction(
+                    *location,
+                    Instruction::GetVariable(Box::new(*variable_slot)),
+                );
+            }
         }
     }
 }
@@ -306,70 +385,6 @@ fn get_binary_ops() -> HashMap<
         binary_not_equal::<bool, bool>,
     );
 
-    /*
-    for numeric in [ValueType::Int, ValueType::Float] {
-        // Math
-        // Comparison
-        binary_operators.insert((numeric, BinaryOp::Greater, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::GreaterEqual, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::Less, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::LessEqual, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::EqualEqual, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::BangEqual, numeric), ValueType::Bool);
-
-        // Strings
-        binary_operators.insert(
-            (ValueType::String, BinaryOp::Plus, numeric),
-            ValueType::String,
-        );
-
-        // Nil handle
-        binary_operators.insert(
-            (ValueType::Nil, BinaryOp::EqualEqual, numeric),
-            ValueType::Bool,
-        );
-        binary_operators.insert(
-            (ValueType::Nil, BinaryOp::BangEqual, numeric),
-            ValueType::Bool,
-        );
-        binary_operators.insert(
-            (numeric, BinaryOp::EqualEqual, ValueType::Nil),
-            ValueType::Bool,
-        );
-        binary_operators.insert(
-            (numeric, BinaryOp::BangEqual, ValueType::Nil),
-            ValueType::Bool,
-        );
-    }
-
-    // Bool
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::EqualEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::BangEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-
-    // Nil handle
-    binary_operators.insert(
-        (ValueType::Nil, BinaryOp::EqualEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Nil, BinaryOp::BangEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::EqualEqual, ValueType::Nil),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::BangEqual, ValueType::Nil),
-        ValueType::Bool,
-    );*/
-
     binary_operators
 }
 
@@ -379,8 +394,8 @@ fn binary_equal<A: ProgramValue, B: ProgramValue>(
 ) where
     A: PartialEq<B>,
 {
-    let a = a_orig.as_any().downcast_ref::<A>().unwrap();
-    let b = b_orig.as_any().downcast_ref::<B>().unwrap();
+    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<A>() };
+    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<B>() };
 
     *a_orig = Box::new(a == b);
 }
@@ -391,8 +406,8 @@ fn binary_not_equal<A: ProgramValue, B: ProgramValue>(
 ) where
     A: PartialEq<B>,
 {
-    let a = a_orig.as_any().downcast_ref::<A>().unwrap();
-    let b = b_orig.as_any().downcast_ref::<B>().unwrap();
+    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<A>() };
+    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<B>() };
 
     *a_orig = Box::new(a != b);
 }
@@ -403,8 +418,8 @@ fn binary_greater<T: ProgramValue>(
 ) where
     T: PartialOrd,
 {
-    let a = a_orig.as_any().downcast_ref::<T>().unwrap();
-    let b = b_orig.as_any().downcast_ref::<T>().unwrap();
+    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
+    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
 
     *a_orig = Box::new(a > b);
 }
@@ -415,8 +430,8 @@ fn binary_greater_equal<T: ProgramValue>(
 ) where
     T: PartialOrd,
 {
-    let a = a_orig.as_any().downcast_ref::<T>().unwrap();
-    let b = b_orig.as_any().downcast_ref::<T>().unwrap();
+    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
+    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
 
     *a_orig = Box::new(a >= b);
 }
@@ -425,8 +440,8 @@ fn binary_lesser<T: ProgramValue>(a_orig: &mut Box<dyn ProgramValue>, b_orig: Bo
 where
     T: PartialOrd,
 {
-    let a = a_orig.as_any().downcast_ref::<T>().unwrap();
-    let b = b_orig.as_any().downcast_ref::<T>().unwrap();
+    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
+    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
 
     *a_orig = Box::new(a < b);
 }
@@ -437,8 +452,8 @@ fn binary_lesser_equal<T: ProgramValue>(
 ) where
     T: PartialOrd,
 {
-    let a = a_orig.as_any().downcast_ref::<T>().unwrap();
-    let b = b_orig.as_any().downcast_ref::<T>().unwrap();
+    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
+    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
 
     *a_orig = Box::new(a <= b);
 }
@@ -450,8 +465,8 @@ fn binary_plus<A: ProgramValue, B: ProgramValue>(
     A: std::ops::AddAssign<B>,
     B: Copy,
 {
-    let a = a.as_any_mut().downcast_mut::<A>().unwrap();
-    let b = b.as_any().downcast_ref::<B>().unwrap();
+    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
+    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
 
     *a += *b;
 }
@@ -463,8 +478,8 @@ fn binary_minus<A: ProgramValue, B: ProgramValue>(
     A: std::ops::SubAssign<B>,
     B: Copy,
 {
-    let a = a.as_any_mut().downcast_mut::<A>().unwrap();
-    let b = b.as_any().downcast_ref::<B>().unwrap();
+    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
+    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
 
     *a -= *b;
 }
@@ -476,8 +491,8 @@ fn binary_multiply<A: ProgramValue, B: ProgramValue>(
     A: std::ops::MulAssign<B>,
     B: Copy,
 {
-    let a = a.as_any_mut().downcast_mut::<A>().unwrap();
-    let b = b.as_any().downcast_ref::<B>().unwrap();
+    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
+    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
 
     *a *= *b;
 }
@@ -489,8 +504,61 @@ fn binary_divide<A: ProgramValue, B: ProgramValue>(
     A: std::ops::DivAssign<B>,
     B: Copy,
 {
-    let a = a.as_any_mut().downcast_mut::<A>().unwrap();
-    let b = b.as_any().downcast_ref::<B>().unwrap();
+    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
+    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
 
     *a /= *b;
+}
+
+fn get_assign_ops()
+-> HashMap<(ValueType, AssignmentOp), fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)> {
+    let mut values: HashMap<
+        (ValueType, AssignmentOp),
+        fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
+    > = Default::default();
+
+    // Int
+    values.insert(
+        (ValueType::Int, AssignmentOp::PlusEqual),
+        binary_plus::<i64, i64>,
+    );
+    values.insert(
+        (ValueType::Int, AssignmentOp::MinusEqual),
+        binary_minus::<i64, i64>,
+    );
+    values.insert(
+        (ValueType::Int, AssignmentOp::MultiplyEqual),
+        binary_multiply::<i64, i64>,
+    );
+    values.insert(
+        (ValueType::Int, AssignmentOp::DivideEqual),
+        binary_divide::<i64, i64>,
+    );
+
+    // Float
+    values.insert(
+        (ValueType::Int, AssignmentOp::PlusEqual),
+        binary_plus::<i64, i64>,
+    );
+    values.insert(
+        (ValueType::Int, AssignmentOp::MinusEqual),
+        binary_minus::<i64, i64>,
+    );
+    values.insert(
+        (ValueType::Int, AssignmentOp::MultiplyEqual),
+        binary_multiply::<i64, i64>,
+    );
+    values.insert(
+        (ValueType::Int, AssignmentOp::DivideEqual),
+        binary_divide::<i64, i64>,
+    );
+
+    // String
+    /*
+    values.insert(
+        (ValueType::String, AssignmentOp::PlusEqual),
+        binary_plus::<String, String>,
+    );*/
+
+    values
 }

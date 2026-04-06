@@ -708,7 +708,7 @@ pub enum VariableMutability {
     Constant,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssignmentOp {
     Equal,
     PlusEqual,

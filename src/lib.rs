@@ -1,11 +1,11 @@
-//mod benching;
+#![feature(downcast_unchecked)]
+
+mod benching;
 mod constructor;
 mod executor;
 mod instructor;
-//mod machine;
 mod parser;
 mod scanner;
-//mod walker;
 
 use std::{
     any::{TypeId, type_name},
@@ -27,8 +27,7 @@ use crate::{
 
 pub fn run(script_name: String, is_bench: bool) {
     if is_bench {
-        todo!();
-        //benching::bench(&script_name);
+        benching::bench(&script_name);
         return;
     }
 
@@ -65,16 +64,6 @@ pub fn run(script_name: String, is_bench: bool) {
 
         let result = Executor::default().run_with_return::<i64>(&program);
         println!("Result: {result:?}");
-        //return;
-
-        // println!("Running walker...");
-        // let result = walker::ExecutionContext::new(library()).run(stmts);
-        // println!("Result: {result:?}");
-
-        //let vm = machine::Vm::new(library(), stmts);
-        //println!("Running machine...");
-        //let result = Vm::run(&vm);
-        //println!("Result: {result:?}");
     } else {
         println!("Failed to get statements.");
     }
