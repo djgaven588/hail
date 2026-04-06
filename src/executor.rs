@@ -1,4 +1,4 @@
-use std::any::{Any, TypeId, type_name, type_name_of_val};
+use std::any::{type_name, type_name_of_val};
 
 use crate::{
     constructor::VariableSlot,
@@ -101,8 +101,7 @@ impl Executor {
                             .clone_box(),
                     );
                 }
-                Instruction::AssignVariable(info) => {
-                    let (variable_slot, action) = info.as_ref();
+                Instruction::AssignVariable(variable_slot, action) => {
                     let b = self
                         .stack
                         .pop()

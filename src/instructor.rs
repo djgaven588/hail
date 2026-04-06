@@ -1,5 +1,5 @@
 use std::{
-    any::{Any, TypeId, type_name},
+    any::{Any, type_name},
     fmt::Debug,
 };
 
@@ -65,17 +65,15 @@ pub enum Instruction {
     // Binary op on values
     Binary(fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)),
     // Pop a variable into a slot
-    SetVariable(Box<VariableSlot>),
+    SetVariable(VariableSlot),
     // Modify an existing variable
     AssignVariable(
-        Box<(
-            VariableSlot,
-            fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
-        )>,
+        VariableSlot,
+        fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
     ),
 
     // Push a variable onto the stack
-    GetVariable(Box<VariableSlot>),
+    GetVariable(VariableSlot),
     // Jump address
     JumpIfFalse(usize),
     Jump(usize),
@@ -129,10 +127,7 @@ impl Instructor {
                 self.statement(astmt);
 
                 // Consume the variable into a slot
-                self.push_instruction(
-                    *location,
-                    Instruction::SetVariable(Box::new(*variable_slot)),
-                );
+                self.push_instruction(*location, Instruction::SetVariable(*variable_slot));
             }
             AStmt::AssignVariable(location, variable_slot, _, op, astmt) => {
                 // Push the variable to the stack
@@ -140,10 +135,7 @@ impl Instructor {
 
                 if op == &AssignmentOp::Equal {
                     // Regular assignment
-                    self.push_instruction(
-                        *location,
-                        Instruction::SetVariable(Box::new(*variable_slot)),
-                    );
+                    self.push_instruction(*location, Instruction::SetVariable(*variable_slot));
                     return;
                 }
 
@@ -155,7 +147,7 @@ impl Instructor {
                 // Consume the variable into a slot
                 self.push_instruction(
                     *location,
-                    Instruction::AssignVariable(Box::new((*variable_slot, *assign_op))),
+                    Instruction::AssignVariable(*variable_slot, *assign_op),
                 );
             }
             AStmt::While(location, condition, body) => {
@@ -241,10 +233,7 @@ impl Instructor {
                 self.push_instruction(*location, Instruction::Binary(*binary));
             }
             AExpr::RetrieveVariable(location, variable_slot, _, _) => {
-                self.push_instruction(
-                    *location,
-                    Instruction::GetVariable(Box::new(*variable_slot)),
-                );
+                self.push_instruction(*location, Instruction::GetVariable(*variable_slot));
             }
         }
     }

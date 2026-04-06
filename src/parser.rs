@@ -661,10 +661,6 @@ impl Parser {
         }
     }
 
-    fn check(&self, expected: TokenType) -> bool {
-        self.peek().is_some_and(|v| v.token_type == expected)
-    }
-
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.current)
     }

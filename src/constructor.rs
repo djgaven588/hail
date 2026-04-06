@@ -1,9 +1,9 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use hashbrown::HashMap;
 
 use crate::{
-    Dynamic, Location, Module,
+    Location, Module,
     instructor::ProgramValue,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
