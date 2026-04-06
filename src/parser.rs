@@ -176,7 +176,7 @@ impl Parser {
 
         self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
 
-        Some(Stmt::Variable(
+        Some(Stmt::DefineVariable(
             name,
             Some(Box::new(initializer)),
             VariableMutability::Constant,
@@ -204,7 +204,7 @@ impl Parser {
 
         self.consume(TokenType::Semicolon, ParseErrorType::MissingSemicolon);
 
-        Some(Stmt::Variable(
+        Some(Stmt::DefineVariable(
             name,
             initializer,
             if mutable {
@@ -717,13 +717,13 @@ pub enum AssignmentOp {
     DivideEqual,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Negate,
     Invert,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Plus,
     Minus,
@@ -740,7 +740,7 @@ pub enum BinaryOp {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     // Name, initializer, mutable
-    Variable(Token, Option<Box<Stmt>>, VariableMutability),
+    DefineVariable(Token, Option<Box<Stmt>>, VariableMutability),
     // Evaluate, can return
     Expression(Box<Expr>, bool),
     Print(Box<Stmt>),
@@ -759,7 +759,7 @@ pub enum Stmt {
 impl Stmt {
     pub fn get_location(&self) -> Location {
         match self {
-            Stmt::Variable(token, _, _) => token.location,
+            Stmt::DefineVariable(token, _, _) => token.location,
             Stmt::Expression(expr, _) => expr.get_location(),
             Stmt::Print(stmt) => stmt.get_location(),
             Stmt::Return(location, _) => *location,

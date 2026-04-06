@@ -1,8 +1,7 @@
 use std::{any::Any, sync::Arc};
 
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scoper,
-    TempScuff,
+    Dynamic, ExecutionError, ExecutionErrorType, FuncInfo, Location, Module, Scoper, TempScuff,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
     scanner::{Token, TokenType},
 };
@@ -17,8 +16,6 @@ pub enum StmtResult {
 pub struct ExecutionContext {
     scoper: Scoper,
 }
-
-impl Executor for ExecutionContext {}
 
 impl ExecutionContext {
     pub fn new(module: Arc<Module>) -> ExecutionContext {

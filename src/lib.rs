@@ -1,8 +1,11 @@
-mod benching;
-mod machine;
+//mod benching;
+mod constructor;
+mod executor;
+mod instructor;
+//mod machine;
 mod parser;
 mod scanner;
-mod walker;
+//mod walker;
 
 use std::{
     any::{TypeId, type_name},
@@ -15,14 +18,17 @@ use std::{
 use hashbrown::HashMap;
 
 use crate::{
-    machine::Vm,
+    constructor::Constructor,
+    executor::Executor,
+    instructor::Instructor,
     parser::{AssignmentOp, BinaryOp, Parser, Stmt, UnaryOp, VariableMutability},
     scanner::Scanner,
 };
 
 pub fn run(script_name: String, is_bench: bool) {
     if is_bench {
-        benching::bench(&script_name);
+        todo!();
+        //benching::bench(&script_name);
         return;
     }
 
@@ -51,20 +57,27 @@ pub fn run(script_name: String, is_bench: bool) {
     }
 
     if let Some(stmts) = parser.get() {
-        println!("Running walker...");
-        let result = walker::ExecutionContext::new(library()).run(stmts);
-        println!("Result: {result:?}");
+        let astmts = Constructor::new(library()).generate(stmts).unwrap();
+        println!("\nConstruct: \n{astmts:?}\n");
 
-        let vm = machine::Vm::new(library(), stmts);
-        println!("Running machine...");
-        let result = Vm::run(&vm);
+        let program = Instructor::new().generate(&astmts);
+        println!("\nInstructions: \n{program:?}\n");
+
+        let result = Executor::default().run_with_return::<i64>(&program);
         println!("Result: {result:?}");
+        //return;
+
+        // println!("Running walker...");
+        // let result = walker::ExecutionContext::new(library()).run(stmts);
+        // println!("Result: {result:?}");
+
+        //let vm = machine::Vm::new(library(), stmts);
+        //println!("Running machine...");
+        //let result = Vm::run(&vm);
+        //println!("Result: {result:?}");
     } else {
         println!("Failed to get statements.");
     }
-
-    /*
-     */
 }
 
 pub trait Scriptable {
@@ -380,14 +393,12 @@ impl Scoper {
     }
 }
 
-pub trait Executor {}
-
 #[derive(Debug)]
 pub struct NativeFuncInfo {
     pub name: String,
     pub signature: Vec<TypeId>,
     pub param_info: Vec<&'static str>,
-    pub call: fn(&mut dyn Executor, Vec<Dynamic>) -> Result<Option<Dynamic>, ExecutionError>,
+    pub call: fn(&mut Executor, Vec<Dynamic>) -> Result<Option<Dynamic>, ExecutionError>,
 }
 
 #[derive(Debug)]

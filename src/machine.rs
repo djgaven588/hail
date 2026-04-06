@@ -3,22 +3,9 @@ use std::sync::Arc;
 use hashbrown::HashMap;
 
 use crate::{
-    Dynamic, ExecutionError, ExecutionErrorType, Executor, FuncInfo, Location, Module, Scoper,
-    TempScuff,
+    Dynamic, ExecutionError, ExecutionErrorType, FuncInfo, Location, Module, Scoper, TempScuff,
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
-
-#[derive(Debug)]
-struct Instruction {
-    location: Location,
-    value: InstructionType,
-}
-
-impl Instruction {
-    pub fn new(location: Location, value: InstructionType) -> Instruction {
-        Instruction { location, value }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InstructionType {
@@ -360,8 +347,6 @@ struct VmContext {
     last_produced: bool,
 }
 
-impl Executor for VmContext {}
-
 impl VmContext {
     fn new(vm: &Arc<Vm>) -> VmContext {
         VmContext {
@@ -688,7 +673,7 @@ impl VmContext {
             }
             (BinaryOp::BangEqual, Dynamic::Nil, b) => *var_a = Dynamic::Bool(Dynamic::Nil != b),
             (BinaryOp::BangEqual, a, Dynamic::Nil) => **a = Dynamic::Bool(&Dynamic::Nil != *a),
-            (op, a, b) => unimplemented!("Compile error: {op:?} {a:?} {b:?}"),
+            (op, a, b) => unimplemented!("Compile error: {a:?} {op:?} {b:?}"),
         }
 
         Ok(())
