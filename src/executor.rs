@@ -48,9 +48,15 @@ impl Executor {
     fn execute(&mut self, program: &Program) -> Result<(), ExecutorError> {
         while self.counter < program.instructions.len() {
             let instruction = &program.instructions[self.counter];
-            //std::thread::sleep(std::time::Duration::from_secs(1));
-            //println!("Executing instruction: {instruction:?}");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            println!("Executing instruction: {instruction:?}");
             match instruction {
+                Instruction::Print => {
+                    let value = self.stack.pop().expect("Should have print message");
+                    // Hope that the prior stage set this up correctly. Yolo
+                    let string = unsafe { value.into_any().downcast_unchecked::<String>() };
+                    println!("Print: {string}");
+                }
                 Instruction::Constant(index) => {
                     self.stack.push(program.constants[*index].clone_box());
                 }
@@ -110,6 +116,13 @@ impl Executor {
                     let slot_index = self.resolve_variable_slot(variable_slot);
 
                     action(&mut self.variables[slot_index], b);
+                }
+                Instruction::Stringify(action) => {
+                    action(
+                        self.stack
+                            .last_mut()
+                            .expect("Stack Stringify A should exist."),
+                    );
                 }
             }
 

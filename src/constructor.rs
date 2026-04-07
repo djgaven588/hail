@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use crate::{
     Location, Module,
@@ -8,26 +8,48 @@ use crate::{
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
+enum VariableTypeState {
+    // The known type
+    Known(ValueType),
+    // The previous known type, what it might be set to
+    Conditional(Option<Box<VariableTypeState>>, ValueType),
+}
+
+#[derive(Debug)]
+pub struct Scope {
+    // Variable index, current type (unavailable = undefined)
+    variable_state: HashMap<usize, ValueType>,
+    starting_variable_count: usize,
+    is_global: bool,
+}
+
+impl Scope {
+    pub fn new(start_count: usize, is_global: bool) -> Scope {
+        Scope {
+            variable_state: Default::default(),
+            starting_variable_count: start_count,
+            is_global,
+        }
+    }
+}
+
 struct Frame {
     scope: Vec<Scope>,
     floating_stack: Vec<(Location, ValueType)>,
-    variable_slots: Vec<(Location, String, Option<ValueType>, VariableMutability)>,
     is_global: bool,
+    variable_slots: Vec<(Location, String, VariableMutability)>,
 }
 
 impl Frame {
     fn new(is_global: bool) -> Frame {
         Frame {
-            scope: vec![Scope::default()],
+            scope: vec![Scope::new(0, is_global)],
             floating_stack: vec![],
             variable_slots: vec![],
             is_global,
         }
     }
 }
-
-#[derive(Default)]
-struct Scope {}
 
 pub struct Constructor {
     module: Arc<Module>,
@@ -37,6 +59,8 @@ pub struct Constructor {
     unary_operators: HashMap<(UnaryOp, ValueType), ValueType>,
     // A [OP] [B] -> [C]
     binary_operators: HashMap<(ValueType, BinaryOp, ValueType), ValueType>,
+    // A -> "A"
+    stringify_operators: HashSet<ValueType>,
 
     call_frames: Vec<Frame>,
 }
@@ -81,7 +105,7 @@ impl ConstantValue {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariableSlot {
     pub index: usize,
     pub is_global: bool,
@@ -106,7 +130,7 @@ pub enum AStmt {
     // Condition, body
     While(Location, Box<AStmt>, Box<AStmt>),
     Expression(Location, AExpr),
-    Block(Location, Vec<AStmt>),
+    Block(Location, Vec<AStmt>, Scope),
 }
 
 impl AStmt {
@@ -115,7 +139,7 @@ impl AStmt {
             AStmt::SetVariable(location, _, _, _) => *location,
             AStmt::Expression(location, _) => *location,
             AStmt::While(location, _, _) => *location,
-            AStmt::Block(location, _) => *location,
+            AStmt::Block(location, _, _) => *location,
             AStmt::Print(location, _) => *location,
             AStmt::AssignVariable(location, _, _, _, _) => *location,
         }
@@ -124,11 +148,58 @@ impl AStmt {
     pub fn get_value_type(&self) -> Option<ValueType> {
         match self {
             AStmt::Print(_, _) => None,
-            AStmt::SetVariable(_, _, _, astmt) => astmt.get_value_type(),
             AStmt::Expression(_, aexpr) => Some(aexpr.get_value_type()),
             AStmt::While(_, _, astmt1) => astmt1.get_value_type(),
-            AStmt::Block(_, astmts) => astmts.last().map(|v| v.get_value_type()).flatten(),
-            AStmt::AssignVariable(_, _, _, _, astmt) => astmt.get_value_type(),
+            AStmt::Block(_, astmts, _) => astmts.last().map(|v| v.get_value_type()).flatten(),
+            AStmt::SetVariable(_, _, _, _) => None,
+            AStmt::AssignVariable(_, _, _, _, _) => None,
+        }
+    }
+
+    pub fn retrieved_variables(&self) -> Vec<(VariableSlot, ValueType)> {
+        match self {
+            AStmt::Print(_, _)
+            | AStmt::SetVariable(_, _, _, _)
+            | AStmt::AssignVariable(_, _, _, _, _)
+            | AStmt::While(_, _, _) => return vec![],
+            AStmt::Expression(_, aexpr) => aexpr.retrieved_variables(),
+            AStmt::Block(_, astmts, _) => {
+                let mut results = vec![];
+                for stmt in astmts {
+                    for var in stmt.retrieved_variables() {
+                        results.push(var);
+                    }
+                }
+
+                results
+            }
+        }
+    }
+
+    pub fn modified_variables(&self) -> Vec<(VariableSlot, ValueType)> {
+        match self {
+            AStmt::Expression(_, _) => vec![],
+            AStmt::SetVariable(_, _, _, astmt) => astmt.modified_variables(),
+            AStmt::While(_, astmt_cond, astmt_body) => {
+                let mut cond = astmt_cond.modified_variables();
+                let mut body = astmt_body.modified_variables();
+                cond.append(&mut body);
+
+                cond
+            }
+            AStmt::Print(_, astmt) => astmt.modified_variables(),
+            AStmt::AssignVariable(_, slot, _, _, aexpr) => {
+                vec![(*slot, aexpr.get_value_type().expect("Should be valid"))]
+            }
+            AStmt::Block(_, _, scope) => {
+                let mut values = vec![];
+                for var in &scope.variable_state {
+                    let slot = VariableSlot::new(*var.0, scope.is_global);
+                    values.push((slot, *var.1));
+                }
+
+                values
+            }
         }
     }
 }
@@ -145,6 +216,24 @@ pub enum AExpr {
 }
 
 impl AExpr {
+    fn retrieved_variables(&self) -> Vec<(VariableSlot, ValueType)> {
+        println!("Retrieving: {self:?}");
+        match self {
+            AExpr::Constant(_, _) => vec![],
+            AExpr::Unary(_, _, aexpr, _) => aexpr.retrieved_variables(),
+            AExpr::Binary(_, aexpr_a, _, aexpr_b, _) => {
+                let mut a_vars = aexpr_a.retrieved_variables();
+                let mut b_vars = aexpr_b.retrieved_variables();
+                a_vars.append(&mut b_vars);
+
+                a_vars
+            }
+            AExpr::RetrieveVariable(_, variable_slot, _, value_type) => {
+                vec![(*variable_slot, *value_type)]
+            }
+        }
+    }
+
     fn get_location(&self) -> Location {
         match self {
             AExpr::Constant(location, _) => *location,
@@ -186,8 +275,12 @@ pub enum ConstructErrorType {
     VariableUndefined,
     VariableUninitialized,
     VariableImmutable,
+    // Expected type, modified type
+    VariableTypeAltered(ValueType, ValueType),
     ExpectedBoolean,
     NoValue,
+    UnexpectedValue,
+    CantStringify(ValueType),
 }
 
 impl Constructor {
@@ -198,6 +291,7 @@ impl Constructor {
 
             unary_operators: get_unary_ops(),
             binary_operators: get_binary_ops(),
+            stringify_operators: get_stringify_ops(),
 
             call_frames: vec![Frame::new(true)],
         }
@@ -214,6 +308,7 @@ impl Constructor {
     }
 
     fn statement(&mut self, stmt: &Stmt) -> Result<AStmt, ConstructError> {
+        println!("Stmt: {stmt:?}");
         let stmt = match stmt {
             Stmt::DefineVariable(token, initializer, mutability) => {
                 let initializer = if let Some(initializer) = initializer {
@@ -294,29 +389,86 @@ impl Constructor {
                         ConstructErrorType::ExpectedBoolean,
                     ));
                 }
-                let body = self.statement(body)?;
 
+                let condition_variables = condition.retrieved_variables();
+                println!("Conditional: {condition_variables:?}");
+
+                let body = self.statement(body)?;
+                println!("Modified: {:?}", body.modified_variables());
+                for modified in body.modified_variables() {
+                    if let Some(original) = condition_variables.iter().find(|v| v.0 == modified.0) {
+                        // Make sure we've not fucked it up
+                        if original.1 != modified.1 {
+                            return Err(ConstructError::new(
+                                body.get_location(),
+                                ConstructErrorType::VariableTypeAltered(original.1, modified.1),
+                            ));
+                        }
+                    }
+                }
+
+                if body.get_value_type().is_some() {
+                    println!("Value type: {:?}", body.get_value_type());
+                    // If we have an output, we shouldn't.
+                    return Err(ConstructError::new(
+                        body.get_location(),
+                        ConstructErrorType::UnexpectedValue,
+                    ));
+                }
+
+                // Ensure condition variables aren't type altered
+                for var in condition_variables {
+                    match self.type_check_variable(&var.0, var.1) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            return Err(ConstructError::new(
+                                condition.get_location(),
+                                if let Some(err) = err {
+                                    ConstructErrorType::VariableTypeAltered(var.1, err)
+                                } else {
+                                    ConstructErrorType::VariableUndefined
+                                },
+                            ));
+                        }
+                    }
+                }
+
+                // Variable scope typing is handled by blocks
                 AStmt::While(
                     condition.get_location(),
                     Box::new(condition),
                     Box::new(body),
                 )
             }
-            Stmt::Block(stmts) => {
+            Stmt::Block(location, stmts) => {
+                self.push_scope();
+
                 let mut values = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
                     values.push(self.statement(stmt)?);
                 }
 
-                AStmt::Block(values.first().unwrap().get_location(), values)
+                let scope = self.pop_scope();
+
+                AStmt::Block(*location, values, scope)
             }
             Stmt::Print(stmt) => {
                 let stmt = self.statement(stmt)?;
-                if stmt.get_value_type().is_none() {
+                let Some(value_type) = stmt.get_value_type() else {
                     return Err(ConstructError::new(
                         stmt.get_location(),
                         ConstructErrorType::NoValue,
                     ));
+                };
+
+                if value_type != ValueType::String {
+                    // Make sure we can do the string conversion
+                    if self.stringify_operators.get(&value_type).is_none() {
+                        return Err(ConstructError::new(
+                            stmt.get_location(),
+                            ConstructErrorType::CantStringify(value_type),
+                        ));
+                    }
                 }
 
                 AStmt::Print(stmt.get_location(), Box::new(stmt))
@@ -324,6 +476,33 @@ impl Constructor {
             a => todo!("{a:?}"),
         };
         Ok(stmt)
+    }
+
+    fn push_scope(&mut self) {
+        let call_frame = self.call_frames.last_mut().expect("Should have call frame");
+        call_frame.scope.push(Scope::new(
+            call_frame.variable_slots.len(),
+            call_frame.is_global,
+        ));
+    }
+
+    fn pop_scope(&mut self) -> Scope {
+        let call_frame = self.call_frames.last_mut().expect("Should have call frame");
+        // Get scope, we need to handle variable typing
+        let scope = call_frame.scope.pop().expect("Should have scope");
+
+        // Clear slots
+        call_frame
+            .variable_slots
+            .truncate(scope.starting_variable_count);
+
+        let calling_scope = call_frame.scope.last_mut().expect("Expected scope");
+        for var in &scope.variable_state {
+            calling_scope.variable_state.insert(*var.0, *var.1);
+        }
+
+        // TODO: This needs to apply the scope's variable changes
+        scope
     }
 
     fn alloc_variable(
@@ -356,9 +535,19 @@ impl Constructor {
         };
 
         let index = current_frame.variable_slots.len();
+        // Mark typing info for this scope
+        if let Some(initialized_type) = initialized_type {
+            current_frame
+                .scope
+                .last_mut()
+                .expect("Should have scope")
+                .variable_state
+                .insert(current_frame.variable_slots.len(), initialized_type);
+        }
+
         current_frame
             .variable_slots
-            .push((source, name.to_string(), initialized_type, mutability));
+            .push((source, name.to_string(), mutability));
 
         Ok(VariableSlot::new(index, self.call_frames.len() <= 1))
     }
@@ -368,15 +557,27 @@ impl Constructor {
         source: Location,
         name: &str,
     ) -> Result<(VariableSlot, VariableMutability, Option<ValueType>), ConstructError> {
-        let current_frame = self.call_frames.last_mut().unwrap();
-        let is_global = current_frame.is_global;
+        {
+            let current_frame = self.call_frames.last_mut().unwrap();
+            let is_global = current_frame.is_global;
 
-        for entry in current_frame.variable_slots.iter().enumerate().rev() {
-            let i = entry.0;
-            let entry = entry.1;
+            for entry in current_frame.variable_slots.iter().enumerate().rev() {
+                let i = entry.0;
+                let entry = entry.1;
 
-            if entry.1 == name {
-                return Ok((VariableSlot::new(i, is_global), entry.3, entry.2));
+                if entry.1 != name {
+                    continue;
+                }
+
+                for scope in current_frame.scope.iter().rev() {
+                    // Try and find the variable, we're looking for the *current* type
+                    if let Some(var) = scope.variable_state.get(&i) {
+                        return Ok((VariableSlot::new(i, is_global), entry.2, Some(*var)));
+                    }
+                }
+
+                // We've already found the variable, move on
+                break;
             }
         }
 
@@ -387,9 +588,19 @@ impl Constructor {
                 let i = entry.0;
                 let entry = entry.1;
 
-                if entry.1 == name {
-                    return Ok((VariableSlot::new(i, true), entry.3, entry.2));
+                if entry.1 != name {
+                    continue;
                 }
+
+                for scope in global_frame.scope.iter().rev() {
+                    // Try and find the variable, we're looking for the *current* type
+                    if let Some(var) = scope.variable_state.get(&i) {
+                        return Ok((VariableSlot::new(i, true), entry.2, Some(*var)));
+                    }
+                }
+
+                // We've already found the variable, move on
+                break;
             }
         }
 
@@ -402,11 +613,50 @@ impl Constructor {
     fn modify_variable(&mut self, slot: &VariableSlot, value: ValueType) {
         if slot.is_global {
             let global_frame = self.call_frames.first_mut().unwrap();
-            global_frame.variable_slots[slot.index].2 = Some(value);
+            global_frame
+                .scope
+                .last_mut()
+                .expect("Should have scope")
+                .variable_state
+                .insert(slot.index, value);
+            //global_frame.variable_slots[slot.index].2 = Some(value);
         } else {
             let current_frame = self.call_frames.last_mut().unwrap();
-            current_frame.variable_slots[slot.index].2 = Some(value);
+
+            current_frame
+                .scope
+                .last_mut()
+                .expect("Should have scope")
+                .variable_state
+                .insert(slot.index, value);
+            //current_frame.variable_slots[slot.index].2 = Some(value);
         }
+    }
+
+    fn type_check_variable(
+        &mut self,
+        slot: &VariableSlot,
+        value: ValueType,
+    ) -> Result<(), Option<ValueType>> {
+        let frame = if slot.is_global {
+            self.call_frames.first_mut().unwrap()
+        } else {
+            self.call_frames.last_mut().unwrap()
+        };
+
+        // TODO: Something here is wrong due to the above frame selection
+        for scope in frame.scope.iter().rev() {
+            // Try and find the variable, we're looking for the *current* type
+            if let Some(var) = scope.variable_state.get(&slot.index) {
+                if var == &value {
+                    return Ok(());
+                } else {
+                    return Err(Some(*var));
+                }
+            }
+        }
+
+        Err(None)
     }
 
     fn push_stack(&mut self, source: Location, value: ValueType) {
@@ -422,6 +672,7 @@ impl Constructor {
     }
 
     fn expression(&mut self, expr: &Expr) -> Result<AExpr, ConstructError> {
+        println!("Expr: {expr:?}");
         Ok(match expr {
             Expr::Float(location, val) => {
                 self.push_stack(*location, ValueType::Float);
@@ -491,7 +742,10 @@ impl Constructor {
             }
             Expr::Variable(location, name) => {
                 let (slot, _, variable) = self.find_variable(*location, name)?;
-
+                println!(
+                    "Variable [{name}]: {slot:?} : {variable:?}, Scope: {:?}",
+                    self.call_frames.last().unwrap().scope
+                );
                 let Some(value_type) = variable else {
                     return Err(ConstructError::new(
                         *location,
@@ -595,4 +849,15 @@ fn get_binary_ops() -> HashMap<(ValueType, BinaryOp, ValueType), ValueType> {
     );
 
     binary_operators
+}
+
+fn get_stringify_ops() -> HashSet<ValueType> {
+    let mut values: HashSet<ValueType> = Default::default();
+
+    values.insert(ValueType::Bool);
+    values.insert(ValueType::Int);
+    values.insert(ValueType::Float);
+    values.insert(ValueType::Nil);
+
+    values
 }

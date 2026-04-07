@@ -275,23 +275,29 @@ impl Parser {
             ParseErrorType::ExpectedClosingParenthese,
         );
 
-        self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
+        let block_start = self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock)?;
 
         let body = self.block_statement()?;
 
-        Some(Stmt::Block(vec![
-            // Preamble
-            initializer,
-            Stmt::While(
-                Box::new(condition),
-                Box::new(Stmt::Block(vec![
-                    // Encapsulated Body
-                    Stmt::Block(vec![body]),
-                    // ^ Prevents redeclaration within body impacting loop
-                    chaser,
-                ])),
-            ),
-        ]))
+        Some(Stmt::Block(
+            block_start.location,
+            vec![
+                // Preamble
+                initializer,
+                Stmt::While(
+                    Box::new(condition),
+                    Box::new(Stmt::Block(
+                        body.get_location(),
+                        vec![
+                            // Encapsulated Body
+                            Stmt::Block(body.get_location(), vec![body]),
+                            // ^ Prevents redeclaration within body impacting loop
+                            chaser,
+                        ],
+                    )),
+                ),
+            ],
+        ))
     }
 
     fn while_statement(&mut self) -> Option<Stmt> {
@@ -330,16 +336,10 @@ impl Parser {
             }
         }
 
-        if stmts.is_empty() {
-            // Default fill statement with nil return value
-            // Other things expect at least 1 statement, returning nil by default seems sane.
-            stmts.push(Stmt::Expression(
-                Box::new(Expr::Nil(self.last().unwrap().location)),
-                true,
-            ));
-        }
-
-        Some(Stmt::Block(stmts))
+        Some(Stmt::Block(
+            self.last().expect("Should have previous token").location,
+            stmts,
+        ))
     }
 
     fn return_statement(&mut self) -> Option<Stmt> {
@@ -743,7 +743,7 @@ pub enum Stmt {
     Return(Location, Option<Box<Stmt>>),
     // Name, assignment
     Assign(String, AssignmentOp, Box<Stmt>),
-    Block(Vec<Stmt>),
+    Block(Location, Vec<Stmt>),
     // Condition, body, otherwise
     If(Box<Stmt>, Box<Stmt>, Option<Box<Stmt>>),
     // Condition, body
@@ -760,10 +760,7 @@ impl Stmt {
             Stmt::Print(stmt) => stmt.get_location(),
             Stmt::Return(location, _) => *location,
             Stmt::Assign(_, _, stmt) => stmt.get_location(),
-            Stmt::Block(stmts) => stmts
-                .last()
-                .expect("Block should always have at least 1 statement.")
-                .get_location(),
+            Stmt::Block(location, _) => *location,
             Stmt::If(expr, _, _) => expr.get_location(),
             Stmt::While(stmt, _) => stmt.get_location(),
             Stmt::Function(token, _, _) => token.location,

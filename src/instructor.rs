@@ -58,12 +58,17 @@ pub struct Program {
 
 #[derive(Debug)]
 pub enum Instruction {
+    Print,
+
     // Const index
     Constant(usize),
     // Unary op on value
     Unary(fn(&mut Box<dyn ProgramValue>)),
     // Binary op on values
     Binary(fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)),
+    // A -> "A"
+    Stringify(fn(&mut Box<dyn ProgramValue>)),
+
     // Pop a variable into a slot
     SetVariable(VariableSlot),
     // Modify an existing variable
@@ -89,6 +94,7 @@ pub struct Instructor {
     >,
     assign_ops:
         HashMap<(ValueType, AssignmentOp), fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)>,
+    stringify_ops: HashMap<ValueType, fn(&mut Box<dyn ProgramValue>)>,
 }
 
 impl Instructor {
@@ -103,6 +109,7 @@ impl Instructor {
             unary_ops: get_unary_ops(),
             binary_ops: get_binary_ops(),
             assign_ops: get_assign_ops(),
+            stringify_ops: get_stringify_ops(),
         }
     }
 
@@ -121,7 +128,26 @@ impl Instructor {
 
     fn statement(&mut self, stmt: &AStmt) {
         match stmt {
-            AStmt::Print(location, astmt) => todo!(),
+            AStmt::Print(location, astmt) => {
+                self.statement(astmt);
+
+                let value_type = astmt
+                    .get_value_type()
+                    .expect("Should have return value type");
+                if value_type != ValueType::String {
+                    self.push_instruction(
+                        *location,
+                        Instruction::Stringify(
+                            *self
+                                .stringify_ops
+                                .get(&value_type)
+                                .expect("Should have stringify op"),
+                        ),
+                    );
+                }
+
+                self.push_instruction(*location, Instruction::Print);
+            }
             AStmt::SetVariable(location, variable_slot, _, astmt) => {
                 // Push the variable to the stack
                 self.statement(astmt);
@@ -172,7 +198,7 @@ impl Instructor {
             AStmt::Expression(_, aexpr) => {
                 self.expression(aexpr);
             }
-            AStmt::Block(_, astmts) => {
+            AStmt::Block(_, astmts, _) => {
                 // Before, implementations would handle scoping for blocks explicitly
                 // Here though, with slots, it *shouldn't* need to as only frames matter
                 // So... No realloc of the variables..?
@@ -221,7 +247,7 @@ impl Instructor {
 
                 self.push_instruction(*location, Instruction::Unary(*unary));
             }
-            AExpr::Binary(location, expr_a, binary_op, expr_b, value_type) => {
+            AExpr::Binary(location, expr_a, binary_op, expr_b, _) => {
                 self.expression(expr_a);
                 self.expression(expr_b);
 
@@ -374,7 +400,38 @@ fn get_binary_ops() -> HashMap<
         binary_not_equal::<bool, bool>,
     );
 
+    // Strings
+    binary_operators.insert(
+        (ValueType::String, BinaryOp::Plus, ValueType::String),
+        binary_string_plus::<String, String>,
+    );
+    binary_operators.insert(
+        (ValueType::String, BinaryOp::Plus, ValueType::Int),
+        binary_string_plus::<String, i64>,
+    );
+    binary_operators.insert(
+        (ValueType::String, BinaryOp::Plus, ValueType::Float),
+        binary_string_plus::<String, i64>,
+    );
+    binary_operators.insert(
+        (ValueType::String, BinaryOp::Plus, ValueType::Bool),
+        binary_string_plus::<String, i64>,
+    );
+
     binary_operators
+}
+
+fn binary_string_plus<A: ProgramValue, B: ProgramValue>(
+    a: &mut Box<dyn ProgramValue>,
+    b: Box<dyn ProgramValue>,
+) where
+    A: ToString + for<'a> std::ops::AddAssign<&'a str>,
+    B: ToString,
+{
+    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
+    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
+
+    *a += b.to_string().as_str();
 }
 
 fn binary_equal<A: ProgramValue, B: ProgramValue>(
@@ -550,4 +607,25 @@ fn get_assign_ops()
     );*/
 
     values
+}
+
+fn get_stringify_ops() -> HashMap<ValueType, fn(&mut Box<dyn ProgramValue>)> {
+    let mut values: HashMap<ValueType, fn(&mut Box<dyn ProgramValue + 'static>)> =
+        Default::default();
+
+    values.insert(ValueType::Bool, stringify::<bool>);
+    values.insert(ValueType::Int, stringify::<i64>);
+    values.insert(ValueType::Float, stringify::<f64>);
+    values.insert(ValueType::Nil, |orig| *orig = Box::new("Nil".to_string()));
+
+    values
+}
+
+fn stringify<T: ProgramValue>(val_orig: &mut Box<dyn ProgramValue>)
+where
+    T: ToString,
+{
+    let val = unsafe { val_orig.as_any_mut().downcast_unchecked_mut::<T>() };
+
+    *val_orig = Box::new(val.to_string());
 }
