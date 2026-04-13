@@ -1,6 +1,7 @@
-- [x] Move Position in instruction to seperate vec
-- [x] Change scoping / frame handling to be a flat structure
-
+- [ ] Doc comment parsing / output
+- [ ] Import script into another script (under submodule)
+- [ ] Handle variable typing across statements and conditions properly (half working?)
+- [ ] Document / deal with hardcoded tab spacing in location column(4)
+- [ ] Bring executor, instructor, and constructor up to speed with parser
 - [ ] Call script functions (scripting vs call mode)
-	- [ ] Continuations
-- [ ] Fix string based variable lookups (variable slot mapping?)
+	- [ ] Continuations for self scope callbacks

@@ -1,4 +1,9 @@
-fn my_func(a_var) {
+
+fn my_func(a_var: String) -> String {
+	"a_var: " + a_var
+}
+
+fn my_func(a_var: String) {
 	"a_var: " + a_var
 }
 

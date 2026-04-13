@@ -1,19 +1,13 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 
 use crate::{
     Location, Module,
     instructor::ProgramValue,
+    module::{BinaryFn, BinarySignature, UnaryFn, UnarySignature},
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
-
-enum VariableTypeState {
-    // The known type
-    Known(ValueType),
-    // The previous known type, what it might be set to
-    Conditional(Option<Box<VariableTypeState>>, ValueType),
-}
 
 #[derive(Debug)]
 pub struct Scope {
@@ -55,19 +49,11 @@ pub struct Constructor {
     module: Arc<Module>,
     stmts: Vec<AStmt>,
 
-    // [OP] A
-    unary_operators: HashMap<(UnaryOp, ValueType), ValueType>,
-    // A [OP] [B] -> [C]
-    binary_operators: HashMap<(ValueType, BinaryOp, ValueType), ValueType>,
-    // A -> "A"
-    stringify_operators: HashSet<ValueType>,
-
     call_frames: Vec<Frame>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ValueType {
-    Nil,
     Float,
     Int,
     Bool,
@@ -76,7 +62,6 @@ pub enum ValueType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstantValue {
-    Nil,
     Float(f64),
     Int(i64),
     Bool(bool),
@@ -86,7 +71,6 @@ pub enum ConstantValue {
 impl ConstantValue {
     pub fn to_program_value(&self) -> Box<dyn ProgramValue> {
         match self {
-            ConstantValue::Nil => todo!(),
             ConstantValue::Float(val) => Box::new(*val) as Box<dyn ProgramValue>,
             ConstantValue::Int(val) => Box::new(*val) as Box<dyn ProgramValue>,
             ConstantValue::Bool(val) => Box::new(*val) as Box<dyn ProgramValue>,
@@ -96,7 +80,6 @@ impl ConstantValue {
 
     pub fn get_value_type(&self) -> ValueType {
         match self {
-            ConstantValue::Nil => ValueType::Nil,
             ConstantValue::Float(_) => ValueType::Float,
             ConstantValue::Int(_) => ValueType::Int,
             ConstantValue::Bool(_) => ValueType::Bool,
@@ -122,8 +105,8 @@ pub enum AStmt {
     // Special
     Print(Location, Box<AStmt>),
 
-    // Slot info, name, value stmt
-    SetVariable(Location, VariableSlot, String, Box<AStmt>),
+    // Slot info, name, initializer
+    SetVariable(Location, VariableSlot, String, Option<Box<AStmt>>),
     // Slot info, name, assignment op, value stmt
     AssignVariable(Location, VariableSlot, String, AssignmentOp, Box<AStmt>),
 
@@ -131,6 +114,15 @@ pub enum AStmt {
     While(Location, Box<AStmt>, Box<AStmt>),
     Expression(Location, AExpr),
     Block(Location, Vec<AStmt>, Scope),
+
+    // Function name, parameters, body, return type (if any)
+    Function(
+        Location,
+        String,
+        Vec<(VariableSlot, String, ValueType)>,
+        Box<AStmt>,
+        Option<ValueType>,
+    ),
 }
 
 impl AStmt {
@@ -142,9 +134,11 @@ impl AStmt {
             AStmt::Block(location, _, _) => *location,
             AStmt::Print(location, _) => *location,
             AStmt::AssignVariable(location, _, _, _, _) => *location,
+            AStmt::Function(location, _, _, _, _) => *location,
         }
     }
 
+    /// Recursively search for the value a statment returns
     pub fn get_value_type(&self) -> Option<ValueType> {
         match self {
             AStmt::Print(_, _) => None,
@@ -153,6 +147,29 @@ impl AStmt {
             AStmt::Block(_, astmts, _) => astmts.last().map(|v| v.get_value_type()).flatten(),
             AStmt::SetVariable(_, _, _, _) => None,
             AStmt::AssignVariable(_, _, _, _, _) => None,
+            AStmt::Function(_, _, _, _, value_type) => *value_type,
+        }
+    }
+
+    /// Recursively search for any return statements and get their return types
+    pub fn get_returns(&self) -> Vec<(Location, Option<ValueType>)> {
+        match self {
+            AStmt::Print(_, astmt) => astmt.get_returns(),
+            AStmt::SetVariable(_, _, _, astmt) => {
+                astmt.as_ref().map_or(vec![], |v| v.get_returns())
+            }
+            AStmt::AssignVariable(_, _, _, _, astmt) => astmt.get_returns(),
+            AStmt::Expression(_, _) => vec![],
+            AStmt::While(_, astmt0, astmt1) => {
+                let mut cond = astmt0.get_returns();
+                cond.append(&mut astmt1.get_returns());
+
+                cond
+            }
+            AStmt::Block(_, astmts, _) => {
+                astmts.iter().map(|v| v.get_returns()).flatten().collect()
+            }
+            AStmt::Function(_, _, _, body, _) => body.get_returns(),
         }
     }
 
@@ -173,13 +190,16 @@ impl AStmt {
 
                 results
             }
+            AStmt::Function(_, _, _, astmt, _) => astmt.retrieved_variables(),
         }
     }
 
     pub fn modified_variables(&self) -> Vec<(VariableSlot, ValueType)> {
         match self {
             AStmt::Expression(_, _) => vec![],
-            AStmt::SetVariable(_, _, _, astmt) => astmt.modified_variables(),
+            AStmt::SetVariable(_, _, _, astmt) => {
+                astmt.as_ref().map_or(vec![], |v| v.modified_variables())
+            }
             AStmt::While(_, astmt_cond, astmt_body) => {
                 let mut cond = astmt_cond.modified_variables();
                 let mut body = astmt_body.modified_variables();
@@ -200,6 +220,7 @@ impl AStmt {
 
                 values
             }
+            AStmt::Function(_, _, _, astmt, _) => astmt.modified_variables(),
         }
     }
 }
@@ -208,16 +229,16 @@ impl AStmt {
 pub enum AExpr {
     Constant(Location, ConstantValue),
     // [OP] A -> B
-    Unary(Location, UnaryOp, Box<AExpr>, ValueType),
+    Unary(Location, UnaryFn, Box<AExpr>, ValueType),
     // A [OP] B -> C
-    Binary(Location, Box<AExpr>, BinaryOp, Box<AExpr>, ValueType),
+    Binary(Location, Box<AExpr>, BinaryFn, Box<AExpr>, ValueType),
     // Slot info, name, type
     RetrieveVariable(Location, VariableSlot, String, ValueType),
 }
 
 impl AExpr {
+    /// What variables has this interacted with?
     fn retrieved_variables(&self) -> Vec<(VariableSlot, ValueType)> {
-        println!("Retrieving: {self:?}");
         match self {
             AExpr::Constant(_, _) => vec![],
             AExpr::Unary(_, _, aexpr, _) => aexpr.retrieved_variables(),
@@ -234,6 +255,7 @@ impl AExpr {
         }
     }
 
+    /// Where in the source is this located?
     fn get_location(&self) -> Location {
         match self {
             AExpr::Constant(location, _) => *location,
@@ -243,6 +265,7 @@ impl AExpr {
         }
     }
 
+    /// What value does this produce?
     pub fn get_value_type(&self) -> ValueType {
         match self {
             AExpr::Constant(_, constant_value) => constant_value.get_value_type(),
@@ -281,6 +304,9 @@ pub enum ConstructErrorType {
     NoValue,
     UnexpectedValue,
     CantStringify(ValueType),
+    UnknownType(String),
+    // Expected, provided
+    UnexpectedReturnValue(Option<ValueType>, Option<ValueType>),
 }
 
 impl Constructor {
@@ -288,10 +314,6 @@ impl Constructor {
         Self {
             module,
             stmts: vec![],
-
-            unary_operators: get_unary_ops(),
-            binary_operators: get_binary_ops(),
-            stringify_operators: get_stringify_ops(),
 
             call_frames: vec![Frame::new(true)],
         }
@@ -328,12 +350,7 @@ impl Constructor {
                     slot,
                     token.lexeme.to_owned(),
                     // Set it to the expression, *OR* an empty slot
-                    initializer.unwrap_or_else(|| {
-                        Box::new(AStmt::Expression(
-                            token.location,
-                            AExpr::Constant(token.location, ConstantValue::Nil),
-                        ))
-                    }),
+                    initializer,
                 )
             }
             Stmt::Expression(expr, _) => {
@@ -463,7 +480,7 @@ impl Constructor {
 
                 if value_type != ValueType::String {
                     // Make sure we can do the string conversion
-                    if self.stringify_operators.get(&value_type).is_none() {
+                    if self.module.stringify_ops.get(&value_type).is_none() {
                         return Err(ConstructError::new(
                             stmt.get_location(),
                             ConstructErrorType::CantStringify(value_type),
@@ -473,9 +490,93 @@ impl Constructor {
 
                 AStmt::Print(stmt.get_location(), Box::new(stmt))
             }
+            Stmt::Function(name, params, body, specified_return) => {
+                // Enter new framing
+                self.push_frame();
+
+                // Push all parameters
+                let mut built_params = Vec::with_capacity(params.len());
+                for param in params {
+                    let Some(param_type) = self.module.resolve_type(&param.typing.lexeme) else {
+                        return Err(ConstructError::new(
+                            param.typing.location,
+                            ConstructErrorType::UnknownType(param.typing.lexeme.clone()),
+                        ));
+                    };
+
+                    // Add them to the stack (we know the typing)
+                    let slot = self.push_variable(
+                        param.name.location,
+                        &param.name.lexeme,
+                        param.mutability,
+                        Some(param_type),
+                    )?;
+
+                    built_params.push((slot, param.name.lexeme.clone(), param_type));
+                }
+
+                // Parse the body
+                let body = Box::new(self.statement(body)?);
+
+                // Figure out what this returns
+                // TODO: Return statements aren't considered here!
+                let return_type = if let Some(specified) = specified_return {
+                    let Some(specified_return) = self.module.resolve_type(&specified.lexeme) else {
+                        return Err(ConstructError::new(
+                            specified.location,
+                            ConstructErrorType::UnknownType(specified.lexeme.clone()),
+                        ));
+                    };
+
+                    Some(specified_return)
+                } else {
+                    // If we have no specified return, get the body return
+                    body.get_value_type()
+                };
+
+                // Check the return type against the body
+                if return_type != body.get_value_type() {
+                    return Err(ConstructError::new(
+                        body.get_location(),
+                        ConstructErrorType::UnexpectedReturnValue(
+                            return_type,
+                            body.get_value_type(),
+                        ),
+                    ));
+                }
+
+                // Ensure returns align with expected typing
+                for entry in body.get_returns() {
+                    if entry.1 != return_type {
+                        return Err(ConstructError::new(
+                            entry.0,
+                            ConstructErrorType::UnexpectedReturnValue(return_type, entry.1),
+                        ));
+                    }
+                }
+
+                // End our framing
+                self.pop_frame();
+
+                AStmt::Function(
+                    name.location,
+                    name.lexeme.to_string(),
+                    built_params,
+                    body,
+                    return_type,
+                )
+            }
             a => todo!("{a:?}"),
         };
         Ok(stmt)
+    }
+
+    fn push_frame(&mut self) {
+        self.call_frames.push(Frame::new(false));
+    }
+
+    fn pop_frame(&mut self) {
+        self.call_frames.pop().expect("Should have call frame");
     }
 
     fn push_scope(&mut self) {
@@ -519,8 +620,6 @@ impl Constructor {
             ));
         }
 
-        let current_frame = self.call_frames.last_mut().unwrap();
-
         let initialized_type = if let Some(initializer) = initializer {
             if let Some(value) = initializer.get_value_type() {
                 Some(value)
@@ -533,6 +632,18 @@ impl Constructor {
         } else {
             None
         };
+
+        self.push_variable(source, name, mutability, initialized_type)
+    }
+
+    fn push_variable(
+        &mut self,
+        source: Location,
+        name: &str,
+        mutability: VariableMutability,
+        initialized_type: Option<ValueType>,
+    ) -> Result<VariableSlot, ConstructError> {
+        let current_frame = self.call_frames.last_mut().unwrap();
 
         let index = current_frame.variable_slots.len();
         // Mark typing info for this scope
@@ -569,11 +680,19 @@ impl Constructor {
                     continue;
                 }
 
+                let mut was_found = false;
                 for scope in current_frame.scope.iter().rev() {
                     // Try and find the variable, we're looking for the *current* type
                     if let Some(var) = scope.variable_state.get(&i) {
                         return Ok((VariableSlot::new(i, is_global), entry.2, Some(*var)));
+                    } else {
+                        was_found = true;
                     }
+                }
+
+                if was_found {
+                    // Oh no! It's not initialized :(
+                    return Ok((VariableSlot::new(i, is_global), entry.2, None));
                 }
 
                 // We've already found the variable, move on
@@ -592,11 +711,19 @@ impl Constructor {
                     continue;
                 }
 
+                let mut was_found = false;
                 for scope in global_frame.scope.iter().rev() {
                     // Try and find the variable, we're looking for the *current* type
                     if let Some(var) = scope.variable_state.get(&i) {
                         return Ok((VariableSlot::new(i, true), entry.2, Some(*var)));
+                    } else {
+                        was_found = true;
                     }
+                }
+
+                if was_found {
+                    // Oh no! It's not initialized :(
+                    return Ok((VariableSlot::new(i, true), entry.2, None));
                 }
 
                 // We've already found the variable, move on
@@ -690,16 +817,17 @@ impl Constructor {
                 self.push_stack(*location, ValueType::String);
                 AExpr::Constant(*location, ConstantValue::String(val.to_owned()))
             }
-            Expr::Nil(location) => {
-                self.push_stack(*location, ValueType::Nil);
-                AExpr::Constant(*location, ConstantValue::Nil)
-            }
-            Expr::Unary(op, a) => {
+            Expr::Unary(location, op, a) => {
                 let expr_a = self.expression(a)?;
 
                 let stack_a = self.pop_stack().unwrap();
 
-                let Some(result_type) = self.unary_operators.get(&(*op, stack_a.1)).copied() else {
+                let Some(result_type) = self
+                    .module
+                    .unary_ops
+                    .get(&UnarySignature::new(*op, stack_a.1))
+                    .copied()
+                else {
                     // We don't support this
                     return Err(ConstructError::new(
                         a.get_location(),
@@ -707,9 +835,9 @@ impl Constructor {
                     ));
                 };
 
-                self.push_stack(expr_a.get_location(), result_type);
+                self.push_stack(expr_a.get_location(), result_type.1);
 
-                AExpr::Unary(a.get_location(), *op, Box::new(expr_a), result_type)
+                AExpr::Unary(*location, result_type.0, Box::new(expr_a), result_type.1)
             }
             Expr::Binary(a, op, b) => {
                 let expr_a = self.expression(a)?;
@@ -719,8 +847,9 @@ impl Constructor {
                 let stack_a = self.pop_stack().unwrap();
 
                 let Some(result_type) = self
-                    .binary_operators
-                    .get(&(stack_a.1, *op, stack_b.1))
+                    .module
+                    .binary_ops
+                    .get(&BinarySignature::new(stack_a.1, *op, stack_b.1))
                     .copied()
                 else {
                     // We don't support this
@@ -730,14 +859,14 @@ impl Constructor {
                     ));
                 };
 
-                self.push_stack(expr_a.get_location(), result_type);
+                self.push_stack(expr_a.get_location(), result_type.1);
 
                 AExpr::Binary(
                     expr.get_location(),
                     Box::new(expr_a),
-                    *op,
+                    result_type.0,
                     Box::new(expr_b),
-                    result_type,
+                    result_type.1,
                 )
             }
             Expr::Variable(location, name) => {
@@ -761,103 +890,4 @@ impl Constructor {
             Expr::Call(expr, exprs) => todo!(),
         })
     }
-}
-
-fn get_unary_ops() -> HashMap<(UnaryOp, ValueType), ValueType> {
-    let mut unary_operators: HashMap<(UnaryOp, ValueType), ValueType> = Default::default();
-
-    for numeric in [ValueType::Int, ValueType::Float] {
-        // Math
-        unary_operators.insert((UnaryOp::Negate, numeric), numeric);
-    }
-
-    unary_operators.insert((UnaryOp::Invert, ValueType::Bool), ValueType::Bool);
-
-    unary_operators
-}
-
-fn get_binary_ops() -> HashMap<(ValueType, BinaryOp, ValueType), ValueType> {
-    let mut binary_operators: HashMap<(ValueType, BinaryOp, ValueType), ValueType> =
-        Default::default();
-
-    for numeric in [ValueType::Int, ValueType::Float] {
-        // Math
-        binary_operators.insert((numeric, BinaryOp::Plus, numeric), numeric);
-        binary_operators.insert((numeric, BinaryOp::Minus, numeric), numeric);
-        binary_operators.insert((numeric, BinaryOp::Multiply, numeric), numeric);
-        binary_operators.insert((numeric, BinaryOp::Divide, numeric), numeric);
-
-        // Comparison
-        binary_operators.insert((numeric, BinaryOp::Greater, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::GreaterEqual, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::Less, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::LessEqual, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::EqualEqual, numeric), ValueType::Bool);
-        binary_operators.insert((numeric, BinaryOp::BangEqual, numeric), ValueType::Bool);
-
-        // Strings
-        binary_operators.insert(
-            (ValueType::String, BinaryOp::Plus, numeric),
-            ValueType::String,
-        );
-
-        // Nil handle
-        binary_operators.insert(
-            (ValueType::Nil, BinaryOp::EqualEqual, numeric),
-            ValueType::Bool,
-        );
-        binary_operators.insert(
-            (ValueType::Nil, BinaryOp::BangEqual, numeric),
-            ValueType::Bool,
-        );
-        binary_operators.insert(
-            (numeric, BinaryOp::EqualEqual, ValueType::Nil),
-            ValueType::Bool,
-        );
-        binary_operators.insert(
-            (numeric, BinaryOp::BangEqual, ValueType::Nil),
-            ValueType::Bool,
-        );
-    }
-
-    // Bool
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::EqualEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::BangEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-
-    // Nil handle
-    binary_operators.insert(
-        (ValueType::Nil, BinaryOp::EqualEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Nil, BinaryOp::BangEqual, ValueType::Bool),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::EqualEqual, ValueType::Nil),
-        ValueType::Bool,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::BangEqual, ValueType::Nil),
-        ValueType::Bool,
-    );
-
-    binary_operators
-}
-
-fn get_stringify_ops() -> HashSet<ValueType> {
-    let mut values: HashSet<ValueType> = Default::default();
-
-    values.insert(ValueType::Bool);
-    values.insert(ValueType::Int);
-    values.insert(ValueType::Float);
-    values.insert(ValueType::Nil);
-
-    values
 }

@@ -1,14 +1,14 @@
 use std::{
     any::{Any, type_name},
     fmt::Debug,
+    sync::Arc,
 };
-
-use hashbrown::HashMap;
 
 use crate::{
     Location,
     constructor::{AExpr, AStmt, ConstantValue, ValueType, VariableSlot},
-    parser::{AssignmentOp, BinaryOp, UnaryOp},
+    module::Module,
+    parser::AssignmentOp,
 };
 
 pub trait ProgramValue: 'static {
@@ -71,6 +71,7 @@ pub enum Instruction {
 
     // Pop a variable into a slot
     SetVariable(VariableSlot),
+    ReserveVariable(VariableSlot),
     // Modify an existing variable
     AssignVariable(
         VariableSlot,
@@ -85,31 +86,21 @@ pub enum Instruction {
 }
 
 pub struct Instructor {
+    module: Arc<Module>,
     program: Program,
     constant_cache: Vec<ConstantValue>,
-    unary_ops: HashMap<(UnaryOp, ValueType), fn(&mut Box<dyn ProgramValue>)>,
-    binary_ops: HashMap<
-        (ValueType, BinaryOp, ValueType),
-        fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
-    >,
-    assign_ops:
-        HashMap<(ValueType, AssignmentOp), fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)>,
-    stringify_ops: HashMap<ValueType, fn(&mut Box<dyn ProgramValue>)>,
 }
 
 impl Instructor {
-    pub fn new() -> Instructor {
+    pub fn new(module: Arc<Module>) -> Instructor {
         Instructor {
+            module,
             program: Program {
                 instructions: vec![],
                 locations: vec![],
                 constants: vec![],
             },
             constant_cache: vec![],
-            unary_ops: get_unary_ops(),
-            binary_ops: get_binary_ops(),
-            assign_ops: get_assign_ops(),
-            stringify_ops: get_stringify_ops(),
         }
     }
 
@@ -139,6 +130,7 @@ impl Instructor {
                         *location,
                         Instruction::Stringify(
                             *self
+                                .module
                                 .stringify_ops
                                 .get(&value_type)
                                 .expect("Should have stringify op"),
@@ -150,10 +142,15 @@ impl Instructor {
             }
             AStmt::SetVariable(location, variable_slot, _, astmt) => {
                 // Push the variable to the stack
-                self.statement(astmt);
+                if let Some(initializer) = astmt {
+                    self.statement(initializer);
 
-                // Consume the variable into a slot
-                self.push_instruction(*location, Instruction::SetVariable(*variable_slot));
+                    // Consume the variable into a slot
+                    self.push_instruction(*location, Instruction::SetVariable(*variable_slot));
+                } else {
+                    // Set the slot to an empty value
+                    self.push_instruction(*location, Instruction::ReserveVariable(*variable_slot));
+                }
             }
             AStmt::AssignVariable(location, variable_slot, _, op, astmt) => {
                 // Push the variable to the stack
@@ -166,7 +163,8 @@ impl Instructor {
                 }
 
                 let assign_op = self
-                    .assign_ops
+                    .module
+                    .assignment_ops
                     .get(&(astmt.get_value_type().expect("Should have value type"), *op))
                     .expect("Assign operator should be available?");
 
@@ -210,6 +208,7 @@ impl Instructor {
 
                 // What would be an exit scope
             }
+            AStmt::Function(location, name, params, body, return_type) => todo!(),
         }
     }
 
@@ -237,395 +236,20 @@ impl Instructor {
 
                 self.push_instruction(*location, Instruction::Constant(const_index));
             }
-            AExpr::Unary(location, unary_op, aexpr, value_type) => {
+            AExpr::Unary(location, unary_op, aexpr, _) => {
                 self.expression(aexpr);
 
-                let unary = self
-                    .unary_ops
-                    .get(&(*unary_op, aexpr.get_value_type()))
-                    .expect("Operator should be available?");
-
-                self.push_instruction(*location, Instruction::Unary(*unary));
+                self.push_instruction(*location, Instruction::Unary(*unary_op));
             }
             AExpr::Binary(location, expr_a, binary_op, expr_b, _) => {
                 self.expression(expr_a);
                 self.expression(expr_b);
 
-                let binary = self
-                    .binary_ops
-                    .get(&(expr_a.get_value_type(), *binary_op, expr_b.get_value_type()))
-                    .expect("Operator should be available?");
-
-                self.push_instruction(*location, Instruction::Binary(*binary));
+                self.push_instruction(*location, Instruction::Binary(*binary_op));
             }
             AExpr::RetrieveVariable(location, variable_slot, _, _) => {
                 self.push_instruction(*location, Instruction::GetVariable(*variable_slot));
             }
         }
     }
-}
-
-fn get_unary_ops() -> HashMap<(UnaryOp, ValueType), fn(a: &mut Box<dyn ProgramValue>)> {
-    let mut unary_operators: HashMap<(UnaryOp, ValueType), fn(a: &mut Box<dyn ProgramValue>)> =
-        Default::default();
-
-    unary_operators.insert((UnaryOp::Negate, ValueType::Int), unary_negate::<i64>);
-    unary_operators.insert((UnaryOp::Negate, ValueType::Float), unary_negate::<f64>);
-
-    unary_operators.insert((UnaryOp::Invert, ValueType::Bool), unary_invert::<bool>);
-
-    unary_operators
-}
-
-fn unary_negate<T: ProgramValue>(a: &mut Box<dyn ProgramValue>)
-where
-    T: Copy + std::ops::Neg<Output = T>,
-{
-    let val = a.as_any_mut().downcast_mut::<T>().unwrap();
-    *val = -*val;
-}
-
-fn unary_invert<T: ProgramValue>(a: &mut Box<dyn ProgramValue>)
-where
-    T: Copy + std::ops::Not<Output = T>,
-{
-    let val = a.as_any_mut().downcast_mut::<T>().unwrap();
-    *val = !*val;
-}
-
-fn get_binary_ops() -> HashMap<
-    (ValueType, BinaryOp, ValueType),
-    fn(a: &mut Box<dyn ProgramValue>, b: Box<dyn ProgramValue>),
-> {
-    let mut binary_operators: HashMap<
-        (ValueType, BinaryOp, ValueType),
-        fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
-    > = Default::default();
-
-    // Math Int
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::Plus, ValueType::Int),
-        binary_plus::<i64, i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::Minus, ValueType::Int),
-        binary_minus::<i64, i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::Multiply, ValueType::Int),
-        binary_multiply::<i64, i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::Divide, ValueType::Int),
-        binary_divide::<i64, i64>,
-    );
-
-    // Math Float
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::Plus, ValueType::Float),
-        binary_plus::<f64, f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::Minus, ValueType::Float),
-        binary_minus::<f64, f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::Multiply, ValueType::Float),
-        binary_multiply::<f64, f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::Divide, ValueType::Float),
-        binary_divide::<f64, f64>,
-    );
-
-    // Compare Int
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::Greater, ValueType::Int),
-        binary_greater::<i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::GreaterEqual, ValueType::Int),
-        binary_greater_equal::<i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::Less, ValueType::Int),
-        binary_lesser::<i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::LessEqual, ValueType::Int),
-        binary_lesser_equal::<i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::EqualEqual, ValueType::Int),
-        binary_equal::<i64, i64>,
-    );
-    binary_operators.insert(
-        (ValueType::Int, BinaryOp::BangEqual, ValueType::Int),
-        binary_not_equal::<i64, i64>,
-    );
-
-    // Compare Float
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::Greater, ValueType::Float),
-        binary_greater::<f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::GreaterEqual, ValueType::Float),
-        binary_greater_equal::<f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::Less, ValueType::Float),
-        binary_lesser::<f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::LessEqual, ValueType::Float),
-        binary_lesser_equal::<f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::EqualEqual, ValueType::Float),
-        binary_equal::<f64, f64>,
-    );
-    binary_operators.insert(
-        (ValueType::Float, BinaryOp::BangEqual, ValueType::Float),
-        binary_not_equal::<f64, f64>,
-    );
-
-    // Compare bool
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::EqualEqual, ValueType::Bool),
-        binary_equal::<bool, bool>,
-    );
-    binary_operators.insert(
-        (ValueType::Bool, BinaryOp::BangEqual, ValueType::Bool),
-        binary_not_equal::<bool, bool>,
-    );
-
-    // Strings
-    binary_operators.insert(
-        (ValueType::String, BinaryOp::Plus, ValueType::String),
-        binary_string_plus::<String, String>,
-    );
-    binary_operators.insert(
-        (ValueType::String, BinaryOp::Plus, ValueType::Int),
-        binary_string_plus::<String, i64>,
-    );
-    binary_operators.insert(
-        (ValueType::String, BinaryOp::Plus, ValueType::Float),
-        binary_string_plus::<String, i64>,
-    );
-    binary_operators.insert(
-        (ValueType::String, BinaryOp::Plus, ValueType::Bool),
-        binary_string_plus::<String, i64>,
-    );
-
-    binary_operators
-}
-
-fn binary_string_plus<A: ProgramValue, B: ProgramValue>(
-    a: &mut Box<dyn ProgramValue>,
-    b: Box<dyn ProgramValue>,
-) where
-    A: ToString + for<'a> std::ops::AddAssign<&'a str>,
-    B: ToString,
-{
-    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
-    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
-
-    *a += b.to_string().as_str();
-}
-
-fn binary_equal<A: ProgramValue, B: ProgramValue>(
-    a_orig: &mut Box<dyn ProgramValue>,
-    b_orig: Box<dyn ProgramValue>,
-) where
-    A: PartialEq<B>,
-{
-    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<A>() };
-    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<B>() };
-
-    *a_orig = Box::new(a == b);
-}
-
-fn binary_not_equal<A: ProgramValue, B: ProgramValue>(
-    a_orig: &mut Box<dyn ProgramValue>,
-    b_orig: Box<dyn ProgramValue>,
-) where
-    A: PartialEq<B>,
-{
-    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<A>() };
-    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<B>() };
-
-    *a_orig = Box::new(a != b);
-}
-
-fn binary_greater<T: ProgramValue>(
-    a_orig: &mut Box<dyn ProgramValue>,
-    b_orig: Box<dyn ProgramValue>,
-) where
-    T: PartialOrd,
-{
-    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
-    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
-
-    *a_orig = Box::new(a > b);
-}
-
-fn binary_greater_equal<T: ProgramValue>(
-    a_orig: &mut Box<dyn ProgramValue>,
-    b_orig: Box<dyn ProgramValue>,
-) where
-    T: PartialOrd,
-{
-    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
-    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
-
-    *a_orig = Box::new(a >= b);
-}
-
-fn binary_lesser<T: ProgramValue>(a_orig: &mut Box<dyn ProgramValue>, b_orig: Box<dyn ProgramValue>)
-where
-    T: PartialOrd,
-{
-    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
-    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
-
-    *a_orig = Box::new(a < b);
-}
-
-fn binary_lesser_equal<T: ProgramValue>(
-    a_orig: &mut Box<dyn ProgramValue>,
-    b_orig: Box<dyn ProgramValue>,
-) where
-    T: PartialOrd,
-{
-    let a = unsafe { a_orig.as_any().downcast_unchecked_ref::<T>() };
-    let b = unsafe { b_orig.as_any().downcast_unchecked_ref::<T>() };
-
-    *a_orig = Box::new(a <= b);
-}
-
-fn binary_plus<A: ProgramValue, B: ProgramValue>(
-    a: &mut Box<dyn ProgramValue>,
-    b: Box<dyn ProgramValue>,
-) where
-    A: std::ops::AddAssign<B>,
-    B: Copy,
-{
-    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
-    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
-
-    *a += *b;
-}
-
-fn binary_minus<A: ProgramValue, B: ProgramValue>(
-    a: &mut Box<dyn ProgramValue>,
-    b: Box<dyn ProgramValue>,
-) where
-    A: std::ops::SubAssign<B>,
-    B: Copy,
-{
-    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
-    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
-
-    *a -= *b;
-}
-
-fn binary_multiply<A: ProgramValue, B: ProgramValue>(
-    a: &mut Box<dyn ProgramValue>,
-    b: Box<dyn ProgramValue>,
-) where
-    A: std::ops::MulAssign<B>,
-    B: Copy,
-{
-    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
-    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
-
-    *a *= *b;
-}
-
-fn binary_divide<A: ProgramValue, B: ProgramValue>(
-    a: &mut Box<dyn ProgramValue>,
-    b: Box<dyn ProgramValue>,
-) where
-    A: std::ops::DivAssign<B>,
-    B: Copy,
-{
-    let a = unsafe { a.as_any_mut().downcast_unchecked_mut::<A>() };
-    let b = unsafe { b.as_any().downcast_unchecked_ref::<B>() };
-
-    *a /= *b;
-}
-
-fn get_assign_ops()
--> HashMap<(ValueType, AssignmentOp), fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>)> {
-    let mut values: HashMap<
-        (ValueType, AssignmentOp),
-        fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>),
-    > = Default::default();
-
-    // Int
-    values.insert(
-        (ValueType::Int, AssignmentOp::PlusEqual),
-        binary_plus::<i64, i64>,
-    );
-    values.insert(
-        (ValueType::Int, AssignmentOp::MinusEqual),
-        binary_minus::<i64, i64>,
-    );
-    values.insert(
-        (ValueType::Int, AssignmentOp::MultiplyEqual),
-        binary_multiply::<i64, i64>,
-    );
-    values.insert(
-        (ValueType::Int, AssignmentOp::DivideEqual),
-        binary_divide::<i64, i64>,
-    );
-
-    // Float
-    values.insert(
-        (ValueType::Int, AssignmentOp::PlusEqual),
-        binary_plus::<i64, i64>,
-    );
-    values.insert(
-        (ValueType::Int, AssignmentOp::MinusEqual),
-        binary_minus::<i64, i64>,
-    );
-    values.insert(
-        (ValueType::Int, AssignmentOp::MultiplyEqual),
-        binary_multiply::<i64, i64>,
-    );
-    values.insert(
-        (ValueType::Int, AssignmentOp::DivideEqual),
-        binary_divide::<i64, i64>,
-    );
-
-    // String
-    /*
-    values.insert(
-        (ValueType::String, AssignmentOp::PlusEqual),
-        binary_plus::<String, String>,
-    );*/
-
-    values
-}
-
-fn get_stringify_ops() -> HashMap<ValueType, fn(&mut Box<dyn ProgramValue>)> {
-    let mut values: HashMap<ValueType, fn(&mut Box<dyn ProgramValue + 'static>)> =
-        Default::default();
-
-    values.insert(ValueType::Bool, stringify::<bool>);
-    values.insert(ValueType::Int, stringify::<i64>);
-    values.insert(ValueType::Float, stringify::<f64>);
-    values.insert(ValueType::Nil, |orig| *orig = Box::new("Nil".to_string()));
-
-    values
-}
-
-fn stringify<T: ProgramValue>(val_orig: &mut Box<dyn ProgramValue>)
-where
-    T: ToString,
-{
-    let val = unsafe { val_orig.as_any_mut().downcast_unchecked_mut::<T>() };
-
-    *val_orig = Box::new(val.to_string());
 }

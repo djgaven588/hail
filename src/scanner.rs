@@ -1,6 +1,6 @@
 use crate::{Location, parser::AssignmentOp};
 
-const KEYWORDS: [(&str, TokenType); 16] = [
+const KEYWORDS: [(&str, TokenType); 15] = [
     ("let", TokenType::Let),
     ("if", TokenType::If),
     ("else", TokenType::Else),
@@ -9,7 +9,6 @@ const KEYWORDS: [(&str, TokenType); 16] = [
     ("loop", TokenType::Loop),
     ("fn", TokenType::Fn),
     ("return", TokenType::Return),
-    ("nil", TokenType::Nil),
     ("true", TokenType::True),
     ("false", TokenType::False),
     ("struct", TokenType::Struct),
@@ -19,7 +18,7 @@ const KEYWORDS: [(&str, TokenType); 16] = [
     ("const", TokenType::Const),
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub location: Location,
     pub token_type: TokenType,
@@ -72,6 +71,7 @@ pub enum TokenType {
     MinusEqual,
     StarEqual,
     SlashEqual,
+    Arrow,
 
     // Literals
     Identifier,
@@ -88,7 +88,6 @@ pub enum TokenType {
     Fn,
     Return,
     Let,
-    Nil,
     True,
     False,
     Struct,
@@ -154,7 +153,7 @@ impl Scanner {
             syntax_errors: vec![],
             tokens: vec![],
             working_start: 0,
-            location: Location::new(1, 0, 0),
+            location: Location::new(1, 1, 0),
         }
     }
 
@@ -177,7 +176,7 @@ impl Scanner {
         match next {
             '\n' => {
                 self.location.line += 1;
-                self.location.column = 0;
+                self.location.column = 1;
                 self.location.length = 0;
                 self.working_start += 1;
                 return true;
@@ -193,6 +192,8 @@ impl Scanner {
             '-' => {
                 if self.try_match('=') {
                     self.push_token(TokenType::MinusEqual);
+                } else if self.try_match('>') {
+                    self.push_token(TokenType::Arrow);
                 } else {
                     self.push_token(TokenType::Minus);
                 }
@@ -278,6 +279,10 @@ impl Scanner {
                     self.identifier_parse();
                 } else if v.is_whitespace() {
                     // This is whitespace, ignore.
+                    if v == '\t' {
+                        // Except if it's tab, in which case be special
+                        self.location.column += 3;
+                    }
                 } else {
                     self.syntax_errors.push(SyntaxError::new(
                         self.location,
@@ -300,7 +305,7 @@ impl Scanner {
         {
             if next == '\n' {
                 self.location.line += 1;
-                self.location.column = 0;
+                self.location.column = 1;
             }
 
             // Discard
@@ -339,8 +344,9 @@ impl Scanner {
 
     fn number_parse(&mut self) {
         // Consume before the decimal (integer part)
+        // Underscores are allowed for readability
         while let Some(next) = self.peek()
-            && next.is_ascii_digit()
+            && (next.is_ascii_digit() || next == '_')
         {
             // Chew number
             let _ = self.consume();
@@ -356,7 +362,7 @@ impl Scanner {
             let _ = self.consume();
 
             while let Some(next) = self.peek()
-                && next.is_ascii_digit()
+                && (next.is_ascii_digit() || next == '_')
             {
                 // Chew number
                 let _ = self.consume();
@@ -395,7 +401,7 @@ impl Scanner {
             while let Some(next) = self.consume() {
                 if next == '\n' {
                     self.location.line += 1;
-                    self.location.column = 0;
+                    self.location.column = 1;
                     continue;
                 }
                 // Another level
@@ -477,7 +483,7 @@ impl Scanner {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SyntaxError {
     location: Location,
     error: SyntaxErrorType,
@@ -489,7 +495,7 @@ impl SyntaxError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyntaxErrorType {
     UnexpectedCharacter(char),
     UnterminatedString,

@@ -3,7 +3,7 @@ use crate::{
     scanner::{Token, TokenType},
 };
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ParseError {
     token: Token,
     error: ParseErrorType,
@@ -15,7 +15,7 @@ impl ParseError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum ParseErrorType {
     ExpectedClosingParenthese,
     ExpectedExpression,
@@ -31,6 +31,8 @@ enum ParseErrorType {
     ExpectedForBody,
     ExpectedAssignmentOp,
     ExpectedComma,
+    ExpectedColon,
+    ExpectedType,
 }
 
 #[derive(Debug)]
@@ -114,7 +116,7 @@ impl Parser {
     }
 
     fn function_declaration(&mut self) -> Option<Stmt> {
-        let Some(name) = self.try_match(&[TokenType::Identifier]).cloned() else {
+        let Some(function_name) = self.try_match(&[TokenType::Identifier]).cloned() else {
             self.error(ParseErrorType::ExpectedIdentifier);
             return None;
         };
@@ -122,7 +124,7 @@ impl Parser {
         self.consume(
             TokenType::LeftParenthese,
             ParseErrorType::ExpectedParameters,
-        );
+        )?;
 
         let mut parameters = vec![];
 
@@ -138,11 +140,18 @@ impl Parser {
             };
 
             // We *must* have an identifier
-            let Some(identifier) = self.try_match(&[TokenType::Identifier]) else {
-                break;
-            };
+            let parameter_name =
+                self.consume(TokenType::Identifier, ParseErrorType::ExpectedIdentifier)?;
 
-            parameters.push((mutability, identifier.clone()));
+            self.consume(TokenType::Colon, ParseErrorType::ExpectedColon)?;
+
+            let typing = self.consume(TokenType::Identifier, ParseErrorType::ExpectedType)?;
+
+            parameters.push(FunctionParameter::new(
+                mutability,
+                parameter_name.clone(),
+                typing,
+            ));
 
             // Remove trailing commas, we're done if there is none.
             if self.try_match(&[TokenType::Comma]).is_none() {
@@ -155,11 +164,24 @@ impl Parser {
             ParseErrorType::ExpectedClosingParenthese,
         );
 
+        // Determine the type
+        let mut return_typing = None;
+        if self.try_match(&[TokenType::Arrow]).is_some() {
+            // Should have an identifier
+            return_typing =
+                Some(self.consume(TokenType::Identifier, ParseErrorType::ExpectedType)?);
+        }
+
         self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock);
 
         let body = self.block_statement()?;
 
-        Some(Stmt::Function(name, parameters, Box::new(body)))
+        Some(Stmt::Function(
+            function_name,
+            parameters,
+            Box::new(body),
+            return_typing,
+        ))
     }
 
     fn const_declaration(&mut self) -> Option<Stmt> {
@@ -431,7 +453,7 @@ impl Parser {
                 }
             };
 
-            if token_precedence < precedence {
+            if token_precedence <= precedence {
                 break;
             }
 
@@ -552,8 +574,8 @@ impl Parser {
         };
 
         match token.token_type {
-            TokenType::Minus => Some(Expr::Unary(op, Box::new(left))),
-            TokenType::Bang => Some(Expr::Unary(op, Box::new(left))),
+            TokenType::Minus => Some(Expr::Unary(token.location, op, Box::new(left))),
+            TokenType::Bang => Some(Expr::Unary(token.location, op, Box::new(left))),
             a => unreachable!("{a:?}"),
         }
     }
@@ -565,6 +587,7 @@ impl Parser {
                 token.location,
                 token
                     .lexeme
+                    .replace("_", "")
                     .parse()
                     .expect("Integer literal should be valid."),
             )),
@@ -579,6 +602,7 @@ impl Parser {
                 token.location,
                 token
                     .lexeme
+                    .replace("_", "")
                     .parse()
                     .expect("Float literal should be valid."),
             )),
@@ -733,7 +757,26 @@ pub enum BinaryOp {
     BangEqual,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionParameter {
+    // TODO: Reference parameters?
+    // reference: bool,
+    pub mutability: VariableMutability,
+    pub name: Token,
+    pub typing: Token,
+}
+
+impl FunctionParameter {
+    fn new(mutability: VariableMutability, name: Token, typing: Token) -> FunctionParameter {
+        FunctionParameter {
+            mutability,
+            name,
+            typing,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     // Name, initializer, mutable
     DefineVariable(Token, Option<Box<Stmt>>, VariableMutability),
@@ -748,8 +791,8 @@ pub enum Stmt {
     If(Box<Stmt>, Box<Stmt>, Option<Box<Stmt>>),
     // Condition, body
     While(Box<Stmt>, Box<Stmt>),
-    // Name, parameter names (with mutability), body
-    Function(Token, Vec<(VariableMutability, Token)>, Box<Stmt>),
+    // Name, parameter names (with mutability), body, explicit return type
+    Function(Token, Vec<FunctionParameter>, Box<Stmt>, Option<Token>),
 }
 
 impl Stmt {
@@ -763,19 +806,18 @@ impl Stmt {
             Stmt::Block(location, _) => *location,
             Stmt::If(expr, _, _) => expr.get_location(),
             Stmt::While(stmt, _) => stmt.get_location(),
-            Stmt::Function(token, _, _) => token.location,
+            Stmt::Function(token, _, _, _) => token.location,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Float(Location, f64),
     Integer(Location, i64),
     Bool(Location, bool),
     String(Location, String),
-    Nil(Location),
-    Unary(UnaryOp, Box<Expr>),
+    Unary(Location, UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     Variable(Location, String),
     Condition(Box<Expr>, Token, Box<Expr>),
@@ -790,8 +832,7 @@ impl Expr {
             Expr::Integer(location, _) => *location,
             Expr::Bool(location, _) => *location,
             Expr::String(location, _) => *location,
-            Expr::Nil(location) => *location,
-            Expr::Unary(_, expr) => expr.get_location(),
+            Expr::Unary(location, _, expr) => *location,
             Expr::Binary(expr, _, _) => expr.get_location(),
             Expr::Variable(location, _) => *location,
             Expr::Condition(_, token, _) => token.location,
@@ -807,8 +848,7 @@ impl Expr {
             Expr::Integer(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
             Expr::Bool(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
             Expr::String(_, token) => "\t".repeat(level) + token.to_string().as_str() + "\n",
-            Expr::Nil(_) => "\t".repeat(level) + "Nil\n",
-            Expr::Unary(op, expr) => {
+            Expr::Unary(_, op, expr) => {
                 "\t".repeat(level)
                     + format!("{:?}{}\n", op, expr.display(level + 1).as_str()).as_str()
             }

@@ -48,8 +48,8 @@ impl Executor {
     fn execute(&mut self, program: &Program) -> Result<(), ExecutorError> {
         while self.counter < program.instructions.len() {
             let instruction = &program.instructions[self.counter];
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            println!("Executing instruction: {instruction:?}");
+            //std::thread::sleep(std::time::Duration::from_secs(1));
+            //println!("Executing instruction: {instruction:?}");
             match instruction {
                 Instruction::Print => {
                     let value = self.stack.pop().expect("Should have print message");
@@ -60,7 +60,9 @@ impl Executor {
                 Instruction::Constant(index) => {
                     self.stack.push(program.constants[*index].clone_box());
                 }
-                Instruction::Unary(_) => todo!(),
+                Instruction::Unary(action) => {
+                    action(self.stack.last_mut().expect("Stack Unary A should exist."));
+                }
                 Instruction::Binary(action) => {
                     let b = self.stack.pop().expect("Stack Binary B should exist.");
                     action(
@@ -73,6 +75,18 @@ impl Executor {
                         .stack
                         .pop()
                         .expect("Set variable stack value should exist.");
+
+                    let slot_index = self.resolve_variable_slot(variable_slot);
+                    // Slots are created only when needed
+                    if self.variables.len() <= slot_index {
+                        self.variables.push(value);
+                    } else {
+                        self.variables[slot_index] = value;
+                    }
+                }
+                Instruction::ReserveVariable(variable_slot) => {
+                    // Reserve the variable slot, it's value will be nothing
+                    let value = Box::new(());
 
                     let slot_index = self.resolve_variable_slot(variable_slot);
                     // Slots are created only when needed

@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    constructor::Constructor, executor::Executor, instructor::Instructor, library, scanner::Scanner,
+    constructor::Constructor, executor::Executor, instructor::Instructor, module::Module,
+    scanner::Scanner,
 };
 
 pub fn bench(script_name: &str) {
@@ -39,14 +40,15 @@ fn machine_bench(script_name: &str, iterations: usize) -> f64 {
         panic!("{:?}", parser.errors());
     }
 
-    let astmts = match Constructor::new(library()).generate(parser.get().unwrap()) {
+    let module = Module::std();
+    let astmts = match Constructor::new(module.clone()).generate(parser.get().unwrap()) {
         Ok(val) => val,
         Err(err) => {
             panic!("Unexpected test failure: {err:?}");
         }
     };
 
-    let program = Instructor::new().generate(&astmts);
+    let program = Instructor::new(module.clone()).generate(&astmts);
     println!("Running machine...");
     let mut average = 0.;
 

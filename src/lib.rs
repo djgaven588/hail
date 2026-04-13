@@ -4,22 +4,18 @@ mod benching;
 mod constructor;
 mod executor;
 mod instructor;
+mod module;
 mod parser;
 mod scanner;
+mod testing;
 
-use std::{
-    any::{TypeId, type_name},
-    fmt::Debug,
-    fs,
-    sync::Arc,
-};
-
-use hashbrown::HashMap;
+use std::{any::TypeId, fmt::Debug, fs};
 
 use crate::{
     constructor::Constructor,
     executor::Executor,
     instructor::{Instructor, ProgramValue},
+    module::Module,
     parser::{Parser, Stmt, VariableMutability},
     scanner::Scanner,
 };
@@ -55,62 +51,17 @@ pub fn run(script_name: String, is_bench: bool) {
     }
 
     if let Some(stmts) = parser.get() {
-        let astmts = Constructor::new(library()).generate(stmts).unwrap();
+        let module = Module::std();
+        let astmts = Constructor::new(module.clone()).generate(stmts).unwrap();
         println!("\nConstruct: \n{astmts:?}\n");
 
-        let program = Instructor::new().generate(&astmts);
+        let program = Instructor::new(module).generate(&astmts);
         println!("\nInstructions: \n{program:?}\n");
 
         let result = Executor::default().run_with_return::<i64>(&program);
         println!("Result: {result:?}");
     } else {
         println!("Failed to get statements.");
-    }
-}
-
-pub fn library() -> Arc<Module> {
-    let mut module = Module::default();
-
-    module
-        .define(
-            "SOMETHING",
-            Box::new(Arc::new(NativeFuncInfo {
-                name: "SOMETHING".to_owned(),
-                signature: vec![TypeId::of::<String>()],
-                param_info: vec![type_name::<String>()],
-                call: |executor, params| {
-                    let arg = params.into_iter().next().unwrap();
-                    todo!();
-                    /*
-                    let arg = arg.unwrap_string();
-                    Ok(Some(Dynamic::String(format!(
-                        "Something was called! Param: {arg}"
-                    ))))*/
-                },
-            })),
-        )
-        .unwrap();
-
-    Arc::new(module)
-}
-
-#[derive(Default)]
-pub struct Module {
-    globals: HashMap<String, Box<dyn ProgramValue>>,
-}
-
-impl Module {
-    pub fn global(&self, name: &str) -> Option<&Box<dyn ProgramValue>> {
-        self.globals.get(name)
-    }
-
-    /// Define constants, functions, anything implementing ``Scripting`` that are made available to scripts
-    pub fn define<T: ProgramValue>(&mut self, name: &str, value: T) -> Result<(), String> {
-        let Some(existing) = self.globals.insert(name.to_string(), Box::new(value)) else {
-            return Ok(());
-        };
-
-        Err(format!("'{name}' was occupied with '{existing:?}'"))
     }
 }
 
@@ -152,7 +103,7 @@ pub struct FuncInfo {
     pub call: TempScuff,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Location {
     line: u32,
     column: u16,
@@ -163,7 +114,7 @@ impl Default for Location {
     fn default() -> Self {
         Self {
             line: 1,
-            column: 0,
+            column: 1,
             length: 0,
         }
     }
