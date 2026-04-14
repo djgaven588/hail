@@ -404,20 +404,20 @@ fn get_assign_ops(module: &mut Module) {
 
     // Float
     module.assignment_ops.insert(
-        (ValueType::Int, AssignmentOp::PlusEqual),
-        binary_plus::<i64, i64>,
+        (ValueType::Float, AssignmentOp::PlusEqual),
+        binary_plus::<f64, f64>,
     );
     module.assignment_ops.insert(
-        (ValueType::Int, AssignmentOp::MinusEqual),
-        binary_minus::<i64, i64>,
+        (ValueType::Float, AssignmentOp::MinusEqual),
+        binary_minus::<f64, f64>,
     );
     module.assignment_ops.insert(
-        (ValueType::Int, AssignmentOp::MultiplyEqual),
-        binary_multiply::<i64, i64>,
+        (ValueType::Float, AssignmentOp::MultiplyEqual),
+        binary_multiply::<f64, f64>,
     );
     module.assignment_ops.insert(
-        (ValueType::Int, AssignmentOp::DivideEqual),
-        binary_divide::<i64, i64>,
+        (ValueType::Float, AssignmentOp::DivideEqual),
+        binary_divide::<f64, f64>,
     );
 
     // String

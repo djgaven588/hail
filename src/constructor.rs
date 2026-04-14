@@ -9,10 +9,33 @@ use crate::{
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum MaybeValueType {
+    Set(ValueType),
+    Maybe(ValueType),
+}
+
+impl MaybeValueType {
+    fn value_type(&self) -> ValueType {
+        match self {
+            MaybeValueType::Set(value_type) => *value_type,
+            MaybeValueType::Maybe(value_type) => *value_type,
+        }
+    }
+
+    fn to_maybe(&self) -> MaybeValueType {
+        match self {
+            MaybeValueType::Set(value_type) | MaybeValueType::Maybe(value_type) => {
+                MaybeValueType::Maybe(*value_type)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Scope {
     // Variable index, current type (unavailable = undefined)
-    variable_state: HashMap<usize, ValueType>,
+    variable_state: HashMap<usize, MaybeValueType>,
     starting_variable_count: usize,
     is_global: bool,
 }
@@ -194,7 +217,7 @@ impl AStmt {
         }
     }
 
-    pub fn modified_variables(&self) -> Vec<(VariableSlot, ValueType)> {
+    pub fn modified_variables(&self) -> Vec<(VariableSlot, MaybeValueType)> {
         match self {
             AStmt::Expression(_, _) => vec![],
             AStmt::SetVariable(_, _, _, astmt) => {
@@ -203,13 +226,23 @@ impl AStmt {
             AStmt::While(_, astmt_cond, astmt_body) => {
                 let mut cond = astmt_cond.modified_variables();
                 let mut body = astmt_body.modified_variables();
+
+                // The body of the while loop may or may not execute, so it's "maybe" something
+                body.iter_mut().for_each(|v| match v.1 {
+                    MaybeValueType::Set(value_type) | MaybeValueType::Maybe(value_type) => {
+                        v.1 = MaybeValueType::Maybe(value_type);
+                    }
+                });
                 cond.append(&mut body);
 
                 cond
             }
             AStmt::Print(_, astmt) => astmt.modified_variables(),
             AStmt::AssignVariable(_, slot, _, _, aexpr) => {
-                vec![(*slot, aexpr.get_value_type().expect("Should be valid"))]
+                vec![(
+                    *slot,
+                    MaybeValueType::Set(aexpr.get_value_type().expect("Should be valid")),
+                )]
             }
             AStmt::Block(_, _, scope) => {
                 let mut values = vec![];
@@ -292,14 +325,17 @@ impl ConstructError {
 pub enum ConstructErrorType {
     NoUnaryOperator(UnaryOp, ValueType),
     NoBinaryOperator(ValueType, BinaryOp, ValueType),
+    NoAssignmentOperator(ValueType, AssignmentOp),
     ConstantMustBeInitialized,
     InitializerDoesntProduce,
     AssignerDoesntProduce,
     VariableUndefined,
     VariableUninitialized,
+    VariablePotentiallyUninitialized,
     VariableImmutable,
     // Expected type, modified type
     VariableTypeAltered(ValueType, ValueType),
+    VariableTypeMaybeAltered(ValueType, ValueType),
     ExpectedBoolean,
     NoValue,
     UnexpectedValue,
@@ -321,7 +357,7 @@ impl Constructor {
 
     pub fn generate(mut self, stmts: &[Stmt]) -> Result<Vec<AStmt>, ConstructError> {
         for stmt in stmts {
-            let stmt = self.statement(stmt)?;
+            let stmt = self.statement(stmt, false)?;
 
             self.stmts.push(stmt);
         }
@@ -329,12 +365,12 @@ impl Constructor {
         Ok(self.stmts)
     }
 
-    fn statement(&mut self, stmt: &Stmt) -> Result<AStmt, ConstructError> {
+    fn statement(&mut self, stmt: &Stmt, is_maybe_mode: bool) -> Result<AStmt, ConstructError> {
         println!("Stmt: {stmt:?}");
         let stmt = match stmt {
             Stmt::DefineVariable(token, initializer, mutability) => {
                 let initializer = if let Some(initializer) = initializer {
-                    Some(Box::new(self.statement(initializer)?))
+                    Some(Box::new(self.statement(initializer, false)?))
                 } else {
                     None
                 };
@@ -358,13 +394,23 @@ impl Constructor {
                 AStmt::Expression(expr.get_location(), expr)
             }
             Stmt::Assign(name, op, stmt) => {
-                let stmt = self.statement(stmt)?;
+                let stmt = self.statement(stmt, false)?;
                 let Some(stmt_type) = stmt.get_value_type() else {
                     return Err(ConstructError::new(
                         stmt.get_location(),
                         ConstructErrorType::AssignerDoesntProduce,
                     ));
                 };
+
+                // Ensure we support the assignment op (equal is language level)
+                if *op != AssignmentOp::Equal {
+                    if self.module.assignment_ops.get(&(stmt_type, *op)).is_none() {
+                        return Err(ConstructError::new(
+                            stmt.get_location(),
+                            ConstructErrorType::NoAssignmentOperator(stmt_type, *op),
+                        ));
+                    }
+                }
 
                 let (slot, mutability, value_type) =
                     self.find_variable(stmt.get_location(), name)?;
@@ -399,7 +445,7 @@ impl Constructor {
                 )
             }
             Stmt::While(condition, body) => {
-                let condition = self.statement(condition)?;
+                let condition = self.statement(condition, false)?;
                 if condition.get_value_type() != Some(ValueType::Bool) {
                     return Err(ConstructError::new(
                         condition.get_location(),
@@ -407,23 +453,30 @@ impl Constructor {
                     ));
                 }
 
-                let condition_variables = condition.retrieved_variables();
-                println!("Conditional: {condition_variables:?}");
+                let condition_retrieved = condition.retrieved_variables();
+                println!("Conditional: {condition_retrieved:?}");
 
-                let body = self.statement(body)?;
-                println!("Modified: {:?}", body.modified_variables());
-                for modified in body.modified_variables() {
-                    if let Some(original) = condition_variables.iter().find(|v| v.0 == modified.0) {
+                let body = self.statement(body, true)?;
+                let body_modified = body.modified_variables();
+                println!("Modified: {:?}", body_modified);
+
+                // Ensure the body doesn't attempt to type alter the condition variables
+                for modified in body_modified {
+                    if let Some(original) = condition_retrieved.iter().find(|v| v.0 == modified.0) {
                         // Make sure we've not fucked it up
-                        if original.1 != modified.1 {
+                        if original.1 != modified.1.value_type() {
                             return Err(ConstructError::new(
                                 body.get_location(),
-                                ConstructErrorType::VariableTypeAltered(original.1, modified.1),
+                                ConstructErrorType::VariableTypeAltered(
+                                    original.1,
+                                    modified.1.value_type(),
+                                ),
                             ));
                         }
                     }
                 }
 
+                // Make sure the body returns nothing, why would a while loop do that?
                 if body.get_value_type().is_some() {
                     println!("Value type: {:?}", body.get_value_type());
                     // If we have an output, we shouldn't.
@@ -431,23 +484,6 @@ impl Constructor {
                         body.get_location(),
                         ConstructErrorType::UnexpectedValue,
                     ));
-                }
-
-                // Ensure condition variables aren't type altered
-                for var in condition_variables {
-                    match self.type_check_variable(&var.0, var.1) {
-                        Ok(_) => {}
-                        Err(err) => {
-                            return Err(ConstructError::new(
-                                condition.get_location(),
-                                if let Some(err) = err {
-                                    ConstructErrorType::VariableTypeAltered(var.1, err)
-                                } else {
-                                    ConstructErrorType::VariableUndefined
-                                },
-                            ));
-                        }
-                    }
                 }
 
                 // Variable scope typing is handled by blocks
@@ -462,15 +498,20 @@ impl Constructor {
 
                 let mut values = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    values.push(self.statement(stmt)?);
+                    values.push(self.statement(stmt, false)?);
                 }
 
                 let scope = self.pop_scope();
 
+                // We *maybe* complete this scope
+                if let Err(err) = self.apply_scope_variables(&scope, is_maybe_mode) {
+                    return Err(ConstructError::new(stmt.get_location(), err));
+                }
+
                 AStmt::Block(*location, values, scope)
             }
             Stmt::Print(stmt) => {
-                let stmt = self.statement(stmt)?;
+                let stmt = self.statement(stmt, false)?;
                 let Some(value_type) = stmt.get_value_type() else {
                     return Err(ConstructError::new(
                         stmt.get_location(),
@@ -516,7 +557,7 @@ impl Constructor {
                 }
 
                 // Parse the body
-                let body = Box::new(self.statement(body)?);
+                let body = Box::new(self.statement(body, true)?);
 
                 // Figure out what this returns
                 // TODO: Return statements aren't considered here!
@@ -580,6 +621,7 @@ impl Constructor {
     }
 
     fn push_scope(&mut self) {
+        println!("Pushed scope");
         let call_frame = self.call_frames.last_mut().expect("Should have call frame");
         call_frame.scope.push(Scope::new(
             call_frame.variable_slots.len(),
@@ -588,6 +630,7 @@ impl Constructor {
     }
 
     fn pop_scope(&mut self) -> Scope {
+        println!("Popped scope");
         let call_frame = self.call_frames.last_mut().expect("Should have call frame");
         // Get scope, we need to handle variable typing
         let scope = call_frame.scope.pop().expect("Should have scope");
@@ -597,13 +640,55 @@ impl Constructor {
             .variable_slots
             .truncate(scope.starting_variable_count);
 
-        let calling_scope = call_frame.scope.last_mut().expect("Expected scope");
-        for var in &scope.variable_state {
-            calling_scope.variable_state.insert(*var.0, *var.1);
-        }
-
         // TODO: This needs to apply the scope's variable changes
         scope
+    }
+
+    fn apply_scope_variables(
+        &mut self,
+        scope: &Scope,
+        maybe: bool,
+    ) -> Result<(), ConstructErrorType> {
+        let call_frame = self.call_frames.last_mut().expect("Should have call frame");
+        let calling_scope = call_frame.scope.last_mut().expect("Expected scope");
+
+        for (index, value_type) in &scope.variable_state {
+            let value_type = if maybe {
+                value_type.to_maybe()
+            } else {
+                *value_type
+            };
+
+            if let Some(existing) = calling_scope.variable_state.get_mut(index) {
+                // If it's already set, we may have conflicts
+                if matches!(existing, MaybeValueType::Set(_)) {
+                    if existing.value_type() != value_type.value_type() {
+                        // We can't trust it if the type is different
+                        return Err(if maybe {
+                            ConstructErrorType::VariableTypeAltered(
+                                existing.value_type(),
+                                value_type.value_type(),
+                            )
+                        } else {
+                            ConstructErrorType::VariableTypeMaybeAltered(
+                                existing.value_type(),
+                                value_type.value_type(),
+                            )
+                        });
+                    } else {
+                        // The type is the same or we're guarenteed to change it
+                        *existing = value_type;
+                    }
+                } else {
+                    *existing = value_type;
+                }
+            } else {
+                // Whatever it is, fine
+                calling_scope.variable_state.insert(*index, value_type);
+            }
+        }
+
+        Ok(())
     }
 
     fn alloc_variable(
@@ -653,7 +738,10 @@ impl Constructor {
                 .last_mut()
                 .expect("Should have scope")
                 .variable_state
-                .insert(current_frame.variable_slots.len(), initialized_type);
+                .insert(
+                    current_frame.variable_slots.len(),
+                    MaybeValueType::Set(initialized_type),
+                );
         }
 
         current_frame
@@ -667,7 +755,7 @@ impl Constructor {
         &mut self,
         source: Location,
         name: &str,
-    ) -> Result<(VariableSlot, VariableMutability, Option<ValueType>), ConstructError> {
+    ) -> Result<(VariableSlot, VariableMutability, Option<MaybeValueType>), ConstructError> {
         {
             let current_frame = self.call_frames.last_mut().unwrap();
             let is_global = current_frame.is_global;
@@ -745,7 +833,7 @@ impl Constructor {
                 .last_mut()
                 .expect("Should have scope")
                 .variable_state
-                .insert(slot.index, value);
+                .insert(slot.index, MaybeValueType::Set(value));
             //global_frame.variable_slots[slot.index].2 = Some(value);
         } else {
             let current_frame = self.call_frames.last_mut().unwrap();
@@ -755,16 +843,17 @@ impl Constructor {
                 .last_mut()
                 .expect("Should have scope")
                 .variable_state
-                .insert(slot.index, value);
+                .insert(slot.index, MaybeValueType::Set(value));
             //current_frame.variable_slots[slot.index].2 = Some(value);
         }
     }
 
+    /*
     fn type_check_variable(
         &mut self,
         slot: &VariableSlot,
         value: ValueType,
-    ) -> Result<(), Option<ValueType>> {
+    ) -> Result<(), Option<MaybeValueType>> {
         let frame = if slot.is_global {
             self.call_frames.first_mut().unwrap()
         } else {
@@ -775,7 +864,13 @@ impl Constructor {
         for scope in frame.scope.iter().rev() {
             // Try and find the variable, we're looking for the *current* type
             if let Some(var) = scope.variable_state.get(&slot.index) {
-                if var == &value {
+                match var {
+                        MaybeValueType::Set(value_type) => {
+
+                        },
+                        MaybeValueType::Maybe(value_type) => todo!(),
+                    }
+                if matches!(*var, MaybeValueType::Set(value)) {
                     return Ok(());
                 } else {
                     return Err(Some(*var));
@@ -784,7 +879,7 @@ impl Constructor {
         }
 
         Err(None)
-    }
+    }*/
 
     fn push_stack(&mut self, source: Location, value: ValueType) {
         self.call_frames
@@ -880,6 +975,16 @@ impl Constructor {
                         *location,
                         ConstructErrorType::VariableUninitialized,
                     ));
+                };
+
+                let value_type = match value_type {
+                    MaybeValueType::Set(value_type) => value_type,
+                    MaybeValueType::Maybe(_) => {
+                        return Err(ConstructError::new(
+                            *location,
+                            ConstructErrorType::VariablePotentiallyUninitialized,
+                        ));
+                    }
                 };
 
                 self.push_stack(*location, value_type);

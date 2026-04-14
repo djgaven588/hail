@@ -5,7 +5,7 @@ use crate::{
     instructor::{Instruction, Program, ProgramValue},
 };
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ExecutorError {
     // Expected name, provided name
     WrongReturnValue(String, String),

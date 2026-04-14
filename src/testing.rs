@@ -263,7 +263,35 @@ mod tests {
         assert_eq!(result, 1_000_000);
     }
 
+    /// Do basic checks on variable mutability, happy cases
+    #[test]
+    fn variable_mutability() {
+        // Ensure constants can be defined, uninitialized can be initialized, and mutable can be mutated.
+        let program = expected_compile(
+            "const X = 1000; let y; y = 10; let mut z; z = 10.0; z += 5.0; z".to_owned(),
+        );
+        let mut executor = Executor::default();
+        assert_eq!(executor.run_with_return::<f64>(&program), Ok(10.0 + 5.0));
+    }
+
     fn expected_compile(source: String) -> crate::instructor::Program {
+        let stmts = expected_parse(source);
+
+        let module = Module::std();
+
+        // Type checking and such
+        let constructor = Constructor::new(module.clone());
+        let astmts = constructor
+            .generate(&stmts)
+            .expect("Should be able to construct");
+
+        // Turn to machine code
+        let instructor = Instructor::new(module);
+        let program = instructor.generate(&astmts);
+        program
+    }
+
+    fn expected_parse(source: String) -> Vec<Stmt> {
         let mut scanner = Scanner::new(source);
         scanner.scan();
 
@@ -277,17 +305,7 @@ mod tests {
         // We should have no errors
         assert_eq!(parser.errors(), &[]);
 
-        let module = Module::std();
-
         // Type checking and such
-        let constructor = Constructor::new(module.clone());
-        let astmts = constructor
-            .generate(parser.get().expect("Should have stmts"))
-            .expect("Should be able to construct");
-
-        // Turn to machine code
-        let instructor = Instructor::new(module);
-        let program = instructor.generate(&astmts);
-        program
+        parser.get().expect("Should have stmts").to_vec()
     }
 }
