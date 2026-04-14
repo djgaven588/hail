@@ -58,7 +58,7 @@ impl Executor {
                     println!("Print: {string}");
                 }
                 Instruction::Constant(index) => {
-                    self.stack.push(program.constants[*index].clone_box());
+                    self.stack.push(index.as_ref().clone_box());
                 }
                 Instruction::Unary(action) => {
                     action(self.stack.last_mut().expect("Stack Unary A should exist."));

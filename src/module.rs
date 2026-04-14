@@ -11,7 +11,7 @@ use crate::{
 pub type UnaryFn = fn(&mut Box<dyn ProgramValue>);
 pub type BinaryFn = fn(&mut Box<dyn ProgramValue>, Box<dyn ProgramValue>);
 
-#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
+#[derive(PartialEq, Eq, Clone, Hash, Debug)]
 pub struct UnarySignature {
     op: UnaryOp,
     value: ValueType,
@@ -23,7 +23,7 @@ impl UnarySignature {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
+#[derive(PartialEq, Eq, Clone, Hash, Debug)]
 pub struct BinarySignature {
     a: ValueType,
     op: BinaryOp,
@@ -55,7 +55,7 @@ impl Module {
             "f64" => Some(ValueType::Float),
             "bool" => Some(ValueType::Bool),
             "String" => Some(ValueType::String),
-            name => self.typing.get(name).copied(),
+            name => self.typing.get(name).cloned(),
         }
     }
 

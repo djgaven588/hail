@@ -9,7 +9,7 @@ use crate::{
     parser::{AssignmentOp, BinaryOp, Expr, Stmt, UnaryOp, VariableMutability},
 };
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MaybeValueType {
     Set(ValueType),
     Maybe(ValueType),
@@ -18,15 +18,15 @@ enum MaybeValueType {
 impl MaybeValueType {
     fn value_type(&self) -> ValueType {
         match self {
-            MaybeValueType::Set(value_type) => *value_type,
-            MaybeValueType::Maybe(value_type) => *value_type,
+            MaybeValueType::Set(value_type) => value_type.clone(),
+            MaybeValueType::Maybe(value_type) => value_type.clone(),
         }
     }
 
     fn to_maybe(&self) -> MaybeValueType {
         match self {
             MaybeValueType::Set(value_type) | MaybeValueType::Maybe(value_type) => {
-                MaybeValueType::Maybe(*value_type)
+                MaybeValueType::Maybe(value_type.clone())
             }
         }
     }
@@ -75,40 +75,13 @@ pub struct Constructor {
     call_frames: Vec<Frame>,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum ValueType {
     Float,
     Int,
     Bool,
     String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConstantValue {
-    Float(f64),
-    Int(i64),
-    Bool(bool),
-    String(String),
-}
-
-impl ConstantValue {
-    pub fn to_program_value(&self) -> Box<dyn ProgramValue> {
-        match self {
-            ConstantValue::Float(val) => Box::new(*val) as Box<dyn ProgramValue>,
-            ConstantValue::Int(val) => Box::new(*val) as Box<dyn ProgramValue>,
-            ConstantValue::Bool(val) => Box::new(*val) as Box<dyn ProgramValue>,
-            ConstantValue::String(val) => Box::new(val.to_string()) as Box<dyn ProgramValue>,
-        }
-    }
-
-    pub fn get_value_type(&self) -> ValueType {
-        match self {
-            ConstantValue::Float(_) => ValueType::Float,
-            ConstantValue::Int(_) => ValueType::Int,
-            ConstantValue::Bool(_) => ValueType::Bool,
-            ConstantValue::String(_) => ValueType::String,
-        }
-    }
+    //Option(Box<ValueType>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,7 +143,7 @@ impl AStmt {
             AStmt::Block(_, astmts, _) => astmts.last().map(|v| v.get_value_type()).flatten(),
             AStmt::SetVariable(_, _, _, _) => None,
             AStmt::AssignVariable(_, _, _, _, _) => None,
-            AStmt::Function(_, _, _, _, value_type) => *value_type,
+            AStmt::Function(_, _, _, _, value_type) => value_type.clone(),
         }
     }
 
@@ -228,9 +201,9 @@ impl AStmt {
                 let mut body = astmt_body.modified_variables();
 
                 // The body of the while loop may or may not execute, so it's "maybe" something
-                body.iter_mut().for_each(|v| match v.1 {
+                body.iter_mut().for_each(|v| match &v.1 {
                     MaybeValueType::Set(value_type) | MaybeValueType::Maybe(value_type) => {
-                        v.1 = MaybeValueType::Maybe(value_type);
+                        v.1 = MaybeValueType::Maybe(value_type.clone());
                     }
                 });
                 cond.append(&mut body);
@@ -248,7 +221,7 @@ impl AStmt {
                 let mut values = vec![];
                 for var in &scope.variable_state {
                     let slot = VariableSlot::new(*var.0, scope.is_global);
-                    values.push((slot, *var.1));
+                    values.push((slot, var.1.clone()));
                 }
 
                 values
@@ -260,7 +233,8 @@ impl AStmt {
 
 #[derive(Debug)]
 pub enum AExpr {
-    Constant(Location, ConstantValue),
+    // The value itself (resolved) and its type
+    Constant(Location, Box<dyn ProgramValue>, ValueType),
     // [OP] A -> B
     Unary(Location, UnaryFn, Box<AExpr>, ValueType),
     // A [OP] B -> C
@@ -273,7 +247,7 @@ impl AExpr {
     /// What variables has this interacted with?
     fn retrieved_variables(&self) -> Vec<(VariableSlot, ValueType)> {
         match self {
-            AExpr::Constant(_, _) => vec![],
+            AExpr::Constant(_, _, _) => vec![],
             AExpr::Unary(_, _, aexpr, _) => aexpr.retrieved_variables(),
             AExpr::Binary(_, aexpr_a, _, aexpr_b, _) => {
                 let mut a_vars = aexpr_a.retrieved_variables();
@@ -283,7 +257,7 @@ impl AExpr {
                 a_vars
             }
             AExpr::RetrieveVariable(_, variable_slot, _, value_type) => {
-                vec![(*variable_slot, *value_type)]
+                vec![(*variable_slot, value_type.clone())]
             }
         }
     }
@@ -291,7 +265,7 @@ impl AExpr {
     /// Where in the source is this located?
     fn get_location(&self) -> Location {
         match self {
-            AExpr::Constant(location, _) => *location,
+            AExpr::Constant(location, _, _) => *location,
             AExpr::Unary(location, _, _, _) => *location,
             AExpr::Binary(location, _, _, _, _) => *location,
             AExpr::RetrieveVariable(location, _, _, _) => *location,
@@ -301,10 +275,10 @@ impl AExpr {
     /// What value does this produce?
     pub fn get_value_type(&self) -> ValueType {
         match self {
-            AExpr::Constant(_, constant_value) => constant_value.get_value_type(),
-            AExpr::Unary(_, _, _, value_type) => *value_type,
-            AExpr::Binary(_, _, _, _, value_type) => *value_type,
-            AExpr::RetrieveVariable(_, _, _, value_type) => *value_type,
+            AExpr::Constant(_, _, value_type) => value_type.clone(),
+            AExpr::Unary(_, _, _, value_type) => value_type.clone(),
+            AExpr::Binary(_, _, _, _, value_type) => value_type.clone(),
+            AExpr::RetrieveVariable(_, _, _, value_type) => value_type.clone(),
         }
     }
 }
@@ -404,7 +378,12 @@ impl Constructor {
 
                 // Ensure we support the assignment op (equal is language level)
                 if *op != AssignmentOp::Equal {
-                    if self.module.assignment_ops.get(&(stmt_type, *op)).is_none() {
+                    if self
+                        .module
+                        .assignment_ops
+                        .get(&(stmt_type.clone(), *op))
+                        .is_none()
+                    {
                         return Err(ConstructError::new(
                             stmt.get_location(),
                             ConstructErrorType::NoAssignmentOperator(stmt_type, *op),
@@ -468,7 +447,7 @@ impl Constructor {
                             return Err(ConstructError::new(
                                 body.get_location(),
                                 ConstructErrorType::VariableTypeAltered(
-                                    original.1,
+                                    original.1.clone(),
                                     modified.1.value_type(),
                                 ),
                             ));
@@ -550,7 +529,7 @@ impl Constructor {
                         param.name.location,
                         &param.name.lexeme,
                         param.mutability,
-                        Some(param_type),
+                        Some(param_type.clone()),
                     )?;
 
                     built_params.push((slot, param.name.lexeme.clone(), param_type));
@@ -656,34 +635,29 @@ impl Constructor {
             let value_type = if maybe {
                 value_type.to_maybe()
             } else {
-                *value_type
+                value_type.clone()
             };
 
             if let Some(existing) = calling_scope.variable_state.get_mut(index) {
                 // If it's already set, we may have conflicts
                 if matches!(existing, MaybeValueType::Set(_)) {
-                    if existing.value_type() != value_type.value_type() {
-                        // We can't trust it if the type is different
-                        return Err(if maybe {
-                            ConstructErrorType::VariableTypeAltered(
-                                existing.value_type(),
-                                value_type.value_type(),
-                            )
-                        } else {
-                            ConstructErrorType::VariableTypeMaybeAltered(
-                                existing.value_type(),
-                                value_type.value_type(),
-                            )
-                        });
-                    } else {
-                        // The type is the same or we're guarenteed to change it
+                    if existing.value_type() == value_type.value_type() {
+                        // Don't care, at all.
+                    } else if matches!(value_type, MaybeValueType::Set(_)) {
+                        // Ok, we care a little bit, but this just overrides
                         *existing = value_type;
+                    } else {
+                        // We can't trust the typing here.
+                        return Err(ConstructErrorType::VariableTypeMaybeAltered(
+                            existing.value_type(),
+                            value_type.value_type(),
+                        ));
                     }
                 } else {
                     *existing = value_type;
                 }
             } else {
-                // Whatever it is, fine
+                // Whatever it is, fine, it's just floating between types
                 calling_scope.variable_state.insert(*index, value_type);
             }
         }
@@ -772,7 +746,7 @@ impl Constructor {
                 for scope in current_frame.scope.iter().rev() {
                     // Try and find the variable, we're looking for the *current* type
                     if let Some(var) = scope.variable_state.get(&i) {
-                        return Ok((VariableSlot::new(i, is_global), entry.2, Some(*var)));
+                        return Ok((VariableSlot::new(i, is_global), entry.2, Some(var.clone())));
                     } else {
                         was_found = true;
                     }
@@ -803,7 +777,7 @@ impl Constructor {
                 for scope in global_frame.scope.iter().rev() {
                     // Try and find the variable, we're looking for the *current* type
                     if let Some(var) = scope.variable_state.get(&i) {
-                        return Ok((VariableSlot::new(i, true), entry.2, Some(*var)));
+                        return Ok((VariableSlot::new(i, true), entry.2, Some(var.clone())));
                     } else {
                         was_found = true;
                     }
@@ -898,19 +872,19 @@ impl Constructor {
         Ok(match expr {
             Expr::Float(location, val) => {
                 self.push_stack(*location, ValueType::Float);
-                AExpr::Constant(*location, ConstantValue::Float(*val))
+                AExpr::Constant(*location, Box::new(*val), ValueType::Float)
             }
             Expr::Integer(location, val) => {
                 self.push_stack(*location, ValueType::Int);
-                AExpr::Constant(*location, ConstantValue::Int(*val))
+                AExpr::Constant(*location, Box::new(*val), ValueType::Int)
             }
             Expr::Bool(location, val) => {
                 self.push_stack(*location, ValueType::Bool);
-                AExpr::Constant(*location, ConstantValue::Bool(*val))
+                AExpr::Constant(*location, Box::new(*val), ValueType::Bool)
             }
             Expr::String(location, val) => {
                 self.push_stack(*location, ValueType::String);
-                AExpr::Constant(*location, ConstantValue::String(val.to_owned()))
+                AExpr::Constant(*location, Box::new(val.to_owned()), ValueType::String)
             }
             Expr::Unary(location, op, a) => {
                 let expr_a = self.expression(a)?;
@@ -920,8 +894,8 @@ impl Constructor {
                 let Some(result_type) = self
                     .module
                     .unary_ops
-                    .get(&UnarySignature::new(*op, stack_a.1))
-                    .copied()
+                    .get(&UnarySignature::new(*op, stack_a.1.clone()))
+                    .cloned()
                 else {
                     // We don't support this
                     return Err(ConstructError::new(
@@ -930,7 +904,7 @@ impl Constructor {
                     ));
                 };
 
-                self.push_stack(expr_a.get_location(), result_type.1);
+                self.push_stack(expr_a.get_location(), result_type.1.clone());
 
                 AExpr::Unary(*location, result_type.0, Box::new(expr_a), result_type.1)
             }
@@ -944,17 +918,21 @@ impl Constructor {
                 let Some(result_type) = self
                     .module
                     .binary_ops
-                    .get(&BinarySignature::new(stack_a.1, *op, stack_b.1))
-                    .copied()
+                    .get(&BinarySignature::new(
+                        stack_a.1.clone(),
+                        *op,
+                        stack_b.1.clone(),
+                    ))
+                    .cloned()
                 else {
                     // We don't support this
                     return Err(ConstructError::new(
                         a.get_location(),
-                        ConstructErrorType::NoBinaryOperator(stack_a.1, *op, stack_b.1),
+                        ConstructErrorType::NoBinaryOperator(stack_a.1, *op, stack_b.1.clone()),
                     ));
                 };
 
-                self.push_stack(expr_a.get_location(), result_type.1);
+                self.push_stack(expr_a.get_location(), result_type.1.clone());
 
                 AExpr::Binary(
                     expr.get_location(),
@@ -987,7 +965,7 @@ impl Constructor {
                     }
                 };
 
-                self.push_stack(*location, value_type);
+                self.push_stack(*location, value_type.clone());
 
                 AExpr::RetrieveVariable(*location, slot, name.to_owned(), value_type)
             }

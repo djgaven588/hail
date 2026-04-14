@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     Location,
-    constructor::{AExpr, AStmt, ConstantValue, ValueType, VariableSlot},
+    constructor::{AExpr, AStmt, ValueType, VariableSlot},
     module::Module,
     parser::AssignmentOp,
 };
@@ -60,8 +60,8 @@ pub struct Program {
 pub enum Instruction {
     Print,
 
-    // Const index
-    Constant(usize),
+    // Const
+    Constant(Box<dyn ProgramValue>),
     // Unary op on value
     Unary(fn(&mut Box<dyn ProgramValue>)),
     // Binary op on values
@@ -88,7 +88,6 @@ pub enum Instruction {
 pub struct Instructor {
     module: Arc<Module>,
     program: Program,
-    constant_cache: Vec<ConstantValue>,
 }
 
 impl Instructor {
@@ -100,7 +99,6 @@ impl Instructor {
                 locations: vec![],
                 constants: vec![],
             },
-            constant_cache: vec![],
         }
     }
 
@@ -214,27 +212,8 @@ impl Instructor {
 
     fn expression(&mut self, expr: &AExpr) {
         match expr {
-            AExpr::Constant(location, constant_value) => {
-                // Try and use an existing constant, checked via the cache.
-                // This cache is needed since the program is "hot", so we
-                // aren't able to tell type info anymore, it's full send.
-                for (index, value) in self.constant_cache.iter().enumerate() {
-                    if value == constant_value {
-                        self.push_instruction(*location, Instruction::Constant(index));
-                        return;
-                    }
-                }
-
-                // Insert a new constant
-                let const_index = self.program.constants.len();
-
-                // This pushes to both the cache and the program so we can compare above
-                self.constant_cache.push(constant_value.clone());
-
-                let program_value = constant_value.to_program_value();
-                self.program.constants.push(program_value);
-
-                self.push_instruction(*location, Instruction::Constant(const_index));
+            AExpr::Constant(location, val, _) => {
+                self.push_instruction(*location, Instruction::Constant(val.as_ref().clone_box()));
             }
             AExpr::Unary(location, unary_op, aexpr, _) => {
                 self.expression(aexpr);
