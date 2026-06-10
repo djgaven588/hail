@@ -2,7 +2,7 @@ const TARGET = 28;
 const REPEAT = 5;
 const ANSWER = 317811;
 
-fn fib(n) {
+fn fib(n: i64) -> i64 {
 	if n <= 1 {
 		n
 	} else {

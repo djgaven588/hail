@@ -1,0 +1,8 @@
+[package]
+name = "hail_testing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hail = { path = "../hail" }
+hail_std = { path = "../hail_std" }

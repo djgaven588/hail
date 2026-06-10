@@ -1,7 +1,6 @@
-[package]
-name = "hail"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["hail", "hail_macro", "hail_testing", "hail_std"]
 
 [profile.profiling]
 inherits = "release"
@@ -13,13 +12,3 @@ debug = true
 #lto = "fat"
 ##strip = true
 #codegen-units = 1
-
-[dependencies]
-hashbrown = "0.16.1"
-rhai = { version = "1.24.0", default-features = false, features = [
-	"internals",
-	"no_custom_syntax",
-	"only_i64",
-	"std",
-	"unchecked",
-]}

@@ -1,0 +1,14 @@
+[package]
+name = "hail"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hashbrown = "0.16.1"
+rhai = { version = "1.24.0", default-features = false, features = [
+	"internals",
+	"no_custom_syntax",
+	"only_i64",
+	"std",
+	"unchecked",
+]}

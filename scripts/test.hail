@@ -45,8 +45,5 @@ print result;
 
 print second_var + my_var;
 
-let third_var = {};
-print third_var;
-
 // Execution error, not mutable
 //second_var = 2.0;

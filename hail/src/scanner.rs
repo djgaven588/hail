@@ -1,6 +1,6 @@
 use crate::{Location, parser::AssignmentOp};
 
-const KEYWORDS: [(&str, TokenType); 15] = [
+pub const KEYWORDS: [(&str, TokenType); 18] = [
     ("let", TokenType::Let),
     ("if", TokenType::If),
     ("else", TokenType::Else),
@@ -9,13 +9,16 @@ const KEYWORDS: [(&str, TokenType); 15] = [
     ("loop", TokenType::Loop),
     ("fn", TokenType::Fn),
     ("return", TokenType::Return),
+    ("break", TokenType::Break),
+    ("continue", TokenType::Continue),
     ("true", TokenType::True),
     ("false", TokenType::False),
     ("struct", TokenType::Struct),
     ("import", TokenType::Import),
-    ("print", TokenType::Print),
     ("mut", TokenType::Mut),
     ("const", TokenType::Const),
+    ("in", TokenType::In),
+    ("as", TokenType::As),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +49,8 @@ pub enum TokenType {
     RightSquare,
     Comma,
     Dot,
+    DotDot,
+    DotDotEqual,
     Minus,
     Plus,
     Colon,
@@ -53,6 +58,7 @@ pub enum TokenType {
     Semicolon,
     Slash,
     Star,
+    Percent,
 
     //
     Bang,
@@ -71,6 +77,7 @@ pub enum TokenType {
     MinusEqual,
     StarEqual,
     SlashEqual,
+    PercentEqual,
     Arrow,
 
     // Literals
@@ -87,14 +94,17 @@ pub enum TokenType {
     For,
     Fn,
     Return,
+    Break,
+    Continue,
     Let,
     True,
     False,
     Struct,
     Import,
-    Print,
     Mut,
     Const,
+    In,
+    As,
 
     // Special
     DocComment,
@@ -188,7 +198,18 @@ impl Scanner {
             '[' => self.push_token(TokenType::LeftSquare),
             ']' => self.push_token(TokenType::RightSquare),
             ',' => self.push_token(TokenType::Comma),
-            '.' => self.push_token(TokenType::Dot),
+            '.' => {
+                // Distinguish '.', '..', and '..='
+                if self.try_match('.') {
+                    if self.try_match('=') {
+                        self.push_token(TokenType::DotDotEqual);
+                    } else {
+                        self.push_token(TokenType::DotDot);
+                    }
+                } else {
+                    self.push_token(TokenType::Dot)
+                }
+            }
             '-' => {
                 if self.try_match('=') {
                     self.push_token(TokenType::MinusEqual);
@@ -272,17 +293,21 @@ impl Scanner {
             '"' => {
                 self.string_parse();
             }
+            '%' => {
+                if self.try_match('=') {
+                    self.push_token(TokenType::PercentEqual);
+                } else {
+                    self.push_token(TokenType::Percent);
+                }
+            }
             v => {
                 if v.is_ascii_digit() {
                     self.number_parse();
-                } else if v.is_ascii_alphabetic() || v == '_' {
+                } else if v.is_ascii_alphabetic() || v == '_' || v == '<' || v == '>' {
+                    // The < and > are here to give the illusion of generic types
                     self.identifier_parse();
                 } else if v.is_whitespace() {
                     // This is whitespace, ignore.
-                    if v == '\t' {
-                        // Except if it's tab, in which case be special
-                        self.location.column += 3;
-                    }
                 } else {
                     self.syntax_errors.push(SyntaxError::new(
                         self.location,
@@ -300,33 +325,88 @@ impl Scanner {
     }
 
     fn string_parse(&mut self) {
+        // Save start location before consuming characters so errors point to the opening quote
+        let mut noted_location = self.location;
+
+        let mut final_string = "".to_string();
+
+        let mut backslashed = false;
         while let Some(next) = self.peek()
-            && next != '"'
+            && (backslashed || next != '"')
         {
+            let char = self.consume().expect("Should have character");
+
             if next == '\n' {
                 self.location.line += 1;
                 self.location.column = 1;
             }
 
-            // Discard
-            let _ = self.consume();
+            if backslashed {
+                match next {
+                    'n' => {
+                        // Build string
+                        final_string.push('\n');
+                    }
+                    '\\' | '"' => {
+                        final_string.push(next);
+                    }
+                    'x' => {
+                        // Hex escape?
+                        // This is ugly, I know, it's also easy :P
+                        if self.peek().is_some_and(|v| v == '1')
+                            && self.peek_next().is_some_and(|v| v == 'b')
+                        {
+                            // Extra consumes
+                            self.consume().expect("Should have.");
+                            self.consume().expect("Should have.");
+
+                            final_string.push('\x1b');
+                        } else {
+                            self.syntax_errors.push(SyntaxError::new(
+                                self.location,
+                                SyntaxErrorType::UnexpectedCharacter('x'),
+                            ));
+                        }
+                    }
+                    char => {
+                        self.syntax_errors.push(SyntaxError::new(
+                            self.location,
+                            SyntaxErrorType::UnexpectedCharacter(char),
+                        ));
+                    }
+                }
+            } else if next == '\\' {
+                // Next character is free to go
+                backslashed = true;
+                continue;
+            } else {
+                // Build string
+                final_string.push(char);
+            }
+
+            // End backslashing
+            backslashed = false;
         }
 
         // Terminate
         if !self.try_match('"') {
             self.syntax_errors.push(SyntaxError::new(
-                self.location,
+                noted_location,
                 SyntaxErrorType::UnterminatedString,
             ));
         } else {
-            self.push_token(TokenType::String);
+            noted_location.column = self.location.column + 1;
+            noted_location.length = self.location.length.saturating_sub(1);
+
+            self.tokens
+                .push(Token::new(noted_location, TokenType::String, &final_string));
         }
     }
 
     fn identifier_parse(&mut self) {
         // We're looking for an identifier or keyword
         while let Some(next) = self.peek()
-            && (next.is_ascii_alphanumeric() || next == '_')
+            && (next.is_ascii_alphanumeric() || next == '_' || next == '<' || next == '>')
         {
             // Chew characters
             let _ = self.consume();
@@ -353,22 +433,27 @@ impl Scanner {
         }
 
         // We're looking for a float
-        if self.peek().is_some_and(|v| v == '.')
-            && self.peek_next().is_some_and(|v| v.is_ascii_digit())
-        {
-            // Float, with additional digits
-
-            // Chew decimal point
-            let _ = self.consume();
-
-            while let Some(next) = self.peek()
-                && (next.is_ascii_digit() || next == '_')
+        if self.peek().is_some_and(|v| v == '.') {
+            if self
+                .peek_next()
+                .is_some_and(|v| v.is_ascii_digit() || (v != '.' && !v.is_ascii_alphanumeric()))
             {
-                // Chew number
+                // Chew decimal point
                 let _ = self.consume();
-            }
 
-            self.push_token(TokenType::Float);
+                // Float, with additional digits
+                while let Some(next) = self.peek()
+                    && (next.is_ascii_digit() || next == '_')
+                {
+                    // Chew number
+                    let _ = self.consume();
+                }
+
+                self.push_token(TokenType::Float);
+            } else {
+                // Probably a dot call on an integer, don't chew the decimal
+                self.push_token(TokenType::Integer);
+            }
         } else {
             self.push_token(TokenType::Integer);
         }
@@ -396,7 +481,8 @@ impl Scanner {
                 }
             }
         } else if self.try_match('*') {
-            // This is a multi-line comment
+            // This is a multi-line comment, save start location before consuming
+            let error_location = self.location;
             let mut level = 1;
             while let Some(next) = self.consume() {
                 if next == '\n' {
@@ -420,7 +506,7 @@ impl Scanner {
                 // Just a comment
             } else {
                 self.syntax_errors.push(SyntaxError::new(
-                    self.location,
+                    error_location,
                     SyntaxErrorType::UnterminatedComment,
                 ));
             }
@@ -481,11 +567,16 @@ impl Scanner {
             Some(&self.tokens)
         }
     }
+
+    /// Returns the source text that was scanned
+    pub fn source(&self) -> &str {
+        &self.source
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SyntaxError {
-    location: Location,
+    pub location: Location,
     error: SyntaxErrorType,
 }
 
@@ -493,9 +584,17 @@ impl SyntaxError {
     pub fn new(location: Location, error: SyntaxErrorType) -> SyntaxError {
         SyntaxError { location, error }
     }
+
+    pub fn message(&self) -> String {
+        match &self.error {
+            SyntaxErrorType::UnexpectedCharacter(c) => format!("Unexpected character '{c}'."),
+            SyntaxErrorType::UnterminatedString => "Unterminated string literal.".to_string(),
+            SyntaxErrorType::UnterminatedComment => "Unterminated multi-line comment.".to_string(),
+        }
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SyntaxErrorType {
     UnexpectedCharacter(char),
     UnterminatedString,

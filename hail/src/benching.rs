@@ -1,15 +1,19 @@
 use std::{
     fs,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use crate::{
-    constructor::Constructor, executor::Executor, instructor::Instructor, module::Module,
+    constructor::{Constructor, MemoryImportResolver},
+    executor::Executor,
+    instructor::Instructor,
+    module::Module,
     scanner::Scanner,
 };
 
 pub fn bench(script_name: &str) {
-    let iterations = 50;
+    let iterations = 5;
     println!("Running benchmark for script '{script_name}' {iterations} times each.");
     println!("2...");
     std::thread::sleep(Duration::from_secs(1));
@@ -30,8 +34,11 @@ pub fn bench(script_name: &str) {
 }
 
 fn machine_bench(script_name: &str, iterations: usize) -> f64 {
-    let mut scanner =
-        Scanner::new(fs::read_to_string("./".to_string() + script_name + ".hail").unwrap());
+    todo!("Bring back, likely in hail_testing");
+    /*
+    let source_path = "./".to_string() + script_name + ".hail";
+    let source_code = fs::read_to_string(source_path.clone()).unwrap();
+    let mut scanner = Scanner::new(source_code.clone());
     scanner.scan();
     let mut parser = crate::parser::Parser::new(scanner.get().unwrap());
     parser.parse();
@@ -40,15 +47,18 @@ fn machine_bench(script_name: &str, iterations: usize) -> f64 {
         panic!("{:?}", parser.errors());
     }
 
-    let module = Module::std();
-    let astmts = match Constructor::new(module.clone()).generate(parser.get().unwrap()) {
+    let module = Arc::new(Module::std());
+    let resolver = Arc::new(MemoryImportResolver::default());
+    let astmts = match Constructor::new(module.clone(), resolver.clone(), Some(source_path))
+        .generate(parser.get().unwrap())
+    {
         Ok(val) => val,
         Err(err) => {
             panic!("Unexpected test failure: {err:?}");
         }
     };
 
-    let program = Instructor::new(module.clone()).generate(&astmts);
+    let program = Instructor::new(module.clone(), resolver, None).generate(astmts, source_code);
     println!("Running machine...");
     let mut average = 0.;
 
@@ -68,7 +78,7 @@ fn machine_bench(script_name: &str, iterations: usize) -> f64 {
         }
     }
 
-    average / iterations as f64
+    average / iterations as f64*/
 }
 
 fn rhai_bench(script_name: &str, iterations: usize) -> f64 {

@@ -1,0 +1,3 @@
+import "fib" as fib;
+
+print "Imported fib result: " + fib::fib(28);
