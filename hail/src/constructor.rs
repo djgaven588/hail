@@ -1,6 +1,5 @@
 use crate::SyncProgramValue;
 use crate::{FunctionInfo, TokenType, visualize};
-use std::fmt::format;
 use std::{
     any::TypeId,
     collections::HashSet,
@@ -89,6 +88,17 @@ impl Frame {
 #[derive(Default, Clone)]
 pub struct MemoryImportResolver {
     pub script_files: std::collections::HashMap<String, String>,
+}
+
+impl MemoryImportResolver {
+    pub fn new(files: Vec<(String, String)>) -> MemoryImportResolver {
+        let mut script_files: std::collections::HashMap<String, String> = Default::default();
+        for file in files {
+            script_files.insert(file.0, file.1);
+        }
+
+        MemoryImportResolver { script_files }
+    }
 }
 
 impl ImportResolver for MemoryImportResolver {
@@ -231,9 +241,6 @@ pub enum CallSource {
 
 #[derive(Debug)]
 pub enum AStmt {
-    // Special
-    Print(Location, Box<AExpr>),
-
     // Slot info, name, initializer
     SetVariable(Location, VariableSlot, String, Option<Box<AExpr>>),
 
@@ -269,7 +276,6 @@ impl AStmt {
             AStmt::Expression(location, _, _) => *location,
             AStmt::While(location, _, _) => *location,
             AStmt::Loop(expr) => expr.get_location(),
-            AStmt::Print(location, _) => *location,
             AStmt::Return(loc, _) => *loc,
             AStmt::Break(loc) => *loc,
             AStmt::Continue(loc) => *loc,
@@ -281,7 +287,6 @@ impl AStmt {
     /// Recursively search for the value a statment returns
     pub fn get_value_type(&self) -> Option<MaybeValueType> {
         match self {
-            AStmt::Print(_, _) => None,
             AStmt::Expression(_, aexpr, produces) => {
                 if *produces {
                     aexpr.get_value_type()
@@ -304,7 +309,6 @@ impl AStmt {
     /// Recursively search for any return statements and get their return types
     pub fn get_returns(&self) -> Vec<(Location, Option<ValueType>)> {
         match self {
-            AStmt::Print(_, aexpr) => aexpr.get_returns(),
             AStmt::SetVariable(_, _, _, aexpr) => {
                 aexpr.as_ref().map_or(vec![], |v| v.get_returns())
             }
@@ -331,7 +335,6 @@ impl AStmt {
 
     pub fn retrieved_variables(&self) -> Vec<(VariableSlot, MaybeValueType)> {
         match self {
-            AStmt::Print(_, astmt) => astmt.retrieved_variables(),
             AStmt::SetVariable(_, _, _, astmt) => {
                 if let Some(astmt) = astmt {
                     astmt.retrieved_variables()
@@ -376,7 +379,6 @@ impl AStmt {
                 modified
             }
             AStmt::Loop(expr) => expr.modified_variables(),
-            AStmt::Print(_, astmt) => astmt.modified_variables(),
             AStmt::Return(_, s) => s.as_ref().map_or(vec![], |s| s.modified_variables()),
             AStmt::Break(_) => vec![],
             AStmt::Continue(_) => vec![],
@@ -409,7 +411,6 @@ impl AStmt {
                     _ => false,
                 }
             }
-            AStmt::Print(_, _) => false,
             AStmt::SetVariable(_, _, _, _) => false,
             AStmt::While(_, _, _) | AStmt::Loop(_) => false,
             AStmt::Function(_, _, _, _, body, _, _) => body.is_unconditional_exit(),
@@ -1131,6 +1132,7 @@ pub enum ConstructErrorType {
 #[derive(Clone, Debug)]
 pub struct ScriptFunctionSignature {
     pub name: String,
+    pub param_names: Vec<String>,
     pub param_types: Vec<ValueType>,
     pub return_type: Option<ValueType>,
 }
@@ -1139,6 +1141,9 @@ pub struct ScriptFunctionSignature {
 pub struct FinalizedConstruct {
     pub stmts: Vec<AStmt>,
     pub imports: Vec<(String, Program)>,
+
+    // User-defined function signatures for LSP hover
+    pub script_functions: Vec<ScriptFunctionSignature>,
 
     // Cycle detection return
     visiting_paths: HashSet<String>,
@@ -1226,6 +1231,7 @@ impl Constructor {
 
             visiting_paths: self.visiting_paths,
             imports: self.imports,
+            script_functions: self.functions,
         })
     }
 
@@ -1235,8 +1241,10 @@ impl Constructor {
         params: &[FunctionParameter],
         specified_return: Option<ValueType>,
     ) -> Result<(), ConstructError> {
+        let mut param_names = vec![];
         let mut param_types = vec![];
         for param in params {
+            param_names.push(param.name.lexeme.to_string());
             let Some(pt) = self.module.resolve_type(&param.typing.lexeme) else {
                 return Err(ConstructError::new(
                     param.typing.location,
@@ -1248,6 +1256,7 @@ impl Constructor {
 
         self.functions.push(ScriptFunctionSignature {
             name: name.lexeme.to_string(),
+            param_names,
             param_types,
             return_type: specified_return,
         });
@@ -1394,8 +1403,10 @@ impl Constructor {
             }
             Stmt::Function(name, params, body, specified_return) => {
                 // Resolve parameter types once and store them for both registration and frame setup.
+                let mut param_names = Vec::with_capacity(params.len());
                 let mut param_types = Vec::with_capacity(params.len());
                 for param in params {
+                    param_names.push(param.name.lexeme.to_string());
                     let Some(param_type) = self.module.resolve_type(&param.typing.lexeme) else {
                         return Err(ConstructError::new(
                             param.typing.location,
@@ -1426,6 +1437,7 @@ impl Constructor {
                     let function_index = self.functions.len();
                     self.functions.push(ScriptFunctionSignature {
                         name: name.lexeme.to_string(),
+                        param_names,
                         param_types: param_types.clone(),
                         return_type: return_type.clone(),
                     });
@@ -1641,7 +1653,11 @@ impl Constructor {
                 // Program
                 let instructor =
                     Instructor::new(self.module.clone(), self.import_resolver.clone(), None);
-                let program = instructor.generate(final_construct, script.to_owned());
+                let program = instructor.generate(
+                    final_construct,
+                    script.to_owned(),
+                    scanner.get().expect("Already should have tokens").to_vec(),
+                );
 
                 let import_index = self.imports.len();
                 self.imports.push((namespace.lexeme.to_string(), program));
@@ -1694,6 +1710,7 @@ impl Constructor {
 
     fn pop_scope(&mut self) -> Scope {
         //println!("Popped scope");
+
         let call_frame = self.call_frames.last_mut().expect("Should have call frame");
         // Get scope, we need to handle variable typing
         let scope = call_frame.scope.pop().expect("Should have scope");
@@ -1703,7 +1720,60 @@ impl Constructor {
             .variable_slots
             .truncate(scope.starting_variable_count);
 
-        // TODO: This needs to apply the scope's variable changes
+        drop(call_frame);
+
+        // Apply the scope's variable changes back upward through all scopes.
+        // Only propagate if the variable was ALREADY initialized somewhere in the stack
+        // before this block started (exists in any remaining scope).
+        {
+            let source_start = scope.starting_variable_count;
+
+            for (index, value_type) in &scope.variable_state {
+                if *index >= source_start {
+                    continue; // Skip new bindings created in inner scope
+                }
+
+                // Does this variable exist ANYWHERE in the remaining scopes?
+                let exists_anywhere = self
+                    .call_frames
+                    .last()
+                    .unwrap()
+                    .scope
+                    .iter()
+                    .any(|s| s.variable_state.contains_key(index));
+
+                if !exists_anywhere {
+                    continue; // This is a new binding that shouldn't be propagated
+                }
+
+                // Propagate upward through all remaining scopes until we reach one that already has the variable initialized.
+                for _ in 0..self.call_frames.last().unwrap().scope.len() {
+                    let call_frame = self.call_frames.last_mut().expect("Should have call frame");
+                    let calling_scope = call_frame.scope.last_mut().expect("Expected scope");
+
+                    if let Some(existing) = calling_scope.variable_state.get_mut(index) {
+                        // Variable exists in this scope - merge the type
+                        match existing {
+                            MaybeValueType::Set(_) => {
+                                if existing.value_type() != value_type.value_type() {
+                                    *existing = MaybeValueType::Maybe(existing.value_type());
+                                }
+                            }
+                            MaybeValueType::Maybe(_) => {}
+                        }
+                        break; // Propagation complete, we reached an initialized scope
+                    } else {
+                        // Variable doesn't exist in this intermediate empty scope yet.
+                        // Insert it so the next iteration (outer scope) can merge into it,
+                        // or if this is the outermost remaining scope, keep it here.
+                        calling_scope
+                            .variable_state
+                            .insert(*index, value_type.clone());
+                    }
+                }
+            }
+        }
+
         scope
     }
 
@@ -3080,7 +3150,8 @@ impl Constructor {
                             )
                         }
                     } else {
-                        self.expression(
+                        // Compound assignment on simple variable (e.g., progress -= 1)
+                        let result = self.expression(
                             &Expr::DotAccess(
                                 destination.clone(),
                                 op.to_string(),
@@ -3088,7 +3159,22 @@ impl Constructor {
                             ),
                             false,
                             None,
-                        )?
+                        )?;
+
+                        // Record that the destination variable is being modified.
+                        if let Expr::Variable(location, name) = destination.as_ref() {
+                            // Get the receiver's type to determine the result type of the compound op.
+                            // For primitive types (int, float), compound ops preserve the receiver's type.
+                            if let Ok((slot, _, Some(var_type))) =
+                                self.find_variable(*location, name)
+                            {
+                                if let MaybeValueType::Set(ty) = var_type {
+                                    self.modify_variable(&slot, ty);
+                                }
+                            }
+                        }
+
+                        result
                     }
                 }
             }

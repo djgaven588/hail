@@ -112,7 +112,7 @@ fn basic_math() {
 
     // Turn to machine code
     let instructor = Instructor::new(module, resolver, None);
-    let program = instructor.generate(astmts, "NOT HERE".to_string());
+    let program = instructor.generate(astmts, "NOT HERE".to_string(), vec![]);
 
     // Should execute to valid value
     let executor = Executor::default();
@@ -189,7 +189,7 @@ fn unary() {
 
     // Turn to machine code
     let instructor = Instructor::new(module, resolver, None);
-    let program = instructor.generate(astmts, "NOT HERE".to_string());
+    let program = instructor.generate(astmts, "NOT HERE".to_string(), vec![]);
 
     // Should execute to valid value
     let executor = Executor::default();
@@ -512,6 +512,62 @@ fn variable_shadowing_mutable() {
     assert_eq!(result, 10);
 }
 
+/// Regression test for variable shadowing with initializer expressions.
+/// When a variable is shadowed by another let that uses the old var's value
+/// in an if else expression, definite initialization tracking must not break.
+/// This was causing chopper.hail to fail with "Variable might be uninitialized".
+#[test]
+fn variable_shadowing_with_initializer_expr() {
+    // Simulates: shadowed by if-else that reads the old var's value
+    let program = expected_compile(
+        "let x = 10; \n\
+         let mut y = if x > 5 { x } else { 0 }; \n\
+         y += 3; \n\
+         y"
+        .to_owned(),
+    );
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should compile and execute");
+    assert_eq!(result, 13);
+}
+
+/// Regression: shadowing + nested if else modifications (mimics chopper.hail on_tick)
+#[test]
+fn variable_shadowing_nested_if_else() {
+    // - Shadow with Option unwrap via if else
+    // - Modify inside nested if else blocks
+    // - Use after all blocks
+    let program = expected_compile(
+        "let mut progress = 0; \n\
+         if true { \n\
+             if progress > 0 { \n\
+                 progress -= 1; \n\
+             } else { \n\
+                 progress += 1; \n\
+             } \n\
+         } \n\
+         if true { \n\
+             let mut was_running = false; \n\
+             if true { \n\
+                 progress += 1; \n\
+                 was_running = true; \n\
+             } else { \n\
+                 progress = 0; \n\
+             } \n\
+             progress += 5; \n\
+         } \n\
+         progress"
+            .to_owned(),
+    );
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should compile and execute");
+    assert_eq!(result, 7);
+}
+
 /// Test block expression returning a value that is used in subsequent operations
 #[test]
 fn block_expression_value_used() {
@@ -667,7 +723,7 @@ fn if_else_followed_by_let() {
 #[test]
 fn if_else_followed_by_return() {
     let program = expected_compile(
-        "let x = 5; { if x > 2 { if x > 3 { print(\"Hi\"); } return; } }".to_owned(),
+        "let x = 5; { if x > 2 { if x > 3 { /* Something */ } return; } }".to_owned(),
     );
     let executor = Executor::default();
     let _ = executor.run(&program).expect("Should execute");
@@ -826,6 +882,94 @@ fn if_else_with_nested_block() {
     assert_eq!(result, 11);
 }
 
+/// Bitwise AND
+#[test]
+fn bitwise_and_operator() {
+    let program = expected_compile("let a = 12; let b = 10; a & b".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 8); // 12 & 10 = 8 (1100 & 1010 = 1000)
+}
+
+/// Bitwise OR
+#[test]
+fn bitwise_or_operator() {
+    let program = expected_compile("let a = 12; let b = 10; a | b".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 14); // 12 | 10 = 14 (1100 | 1010 = 1110)
+}
+
+/// Bitwise XOR
+#[test]
+fn bitwise_xor_operator() {
+    let program = expected_compile("let a = 12; let b = 10; a ^ b".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 6); // 12 ^ 10 = 6 (1100 ^ 1010 = 0110)
+}
+
+/// Bitwise left shift
+#[test]
+fn bitwise_shift_left_operator() {
+    let program = expected_compile("let a = 1; let b = 4; a << b".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 16); // 1 << 4 = 16 (0001 << 4 = 10000)
+}
+
+/// Bitwise right shift
+#[test]
+fn bitwise_shift_right_operator() {
+    let program = expected_compile("let a = 16; let b = 2; a >> b".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 4); // 16 >> 2 = 4 (10000 >> 2 = 00100)
+}
+
+/// Bitwise AND equal
+#[test]
+fn bitwise_and_equal_operator() {
+    let program = expected_compile("let mut a = 15; a &= 10; a".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 10); // 15 &= 10 -> 15 & 10 = 10 (1111 & 1010 = 1010)
+}
+
+/// Bitwise OR equal
+#[test]
+fn bitwise_or_equal_operator() {
+    let program = expected_compile("let mut a = 4; a |= 3; a".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 7); // 4 |= 3 -> 4 | 3 = 7 (0100 | 0011 = 0111)
+}
+
+/// Bitwise XOR equal
+#[test]
+fn bitwise_xor_equal_operator() {
+    let program = expected_compile("let mut a = 15; a ^= 8; a".to_owned());
+    let executor = Executor::default();
+    let result = executor
+        .run_with_return::<i64>(&program)
+        .expect("Should execute");
+    assert_eq!(result, 7); // 15 ^= 8 -> 15 ^ 8 = 7 (1111 ^ 1000 = 0111)
+}
+
 /// Ensure character escaping is working
 #[test]
 fn light_saber_battle() {
@@ -842,6 +986,45 @@ fn light_saber_battle() {
     assert_eq!(
         result,
         "Light saber battle       V/\"\\E\n------------------------------------"
+    );
+}
+
+/// Test fail std function returns execution error with given message
+#[test]
+fn fail_std_function() {
+    let program = expected_compile(r#"fail("this is an error")"#.to_owned());
+    let executor = Executor::default();
+    let result = executor.run(&program);
+    assert!(result.is_err(), "fail() should produce an execution error");
+    let err = result.unwrap_err();
+    assert_eq!(err.message(), "FAIL: this is an error");
+}
+
+/// Test fail std function with empty message
+#[test]
+fn fail_std_function_empty_message() {
+    let program = expected_compile(r#"fail("")"#.to_owned());
+    let executor = Executor::default();
+    let result = executor.run(&program);
+    assert!(
+        result.is_err(),
+        "fail(\"\") should produce an execution error"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(err.message(), "FAIL: ");
+}
+
+/// Test fail std function inside a conditional branch (statement context)
+#[test]
+fn fail_std_function_in_branch() {
+    let program = expected_compile(
+        r#"let x = 10; if x > 5 { fail("x is too big"); } else { /* Ok */ }; 42"#.to_owned(),
+    );
+    let executor = Executor::default();
+    let result = executor.run(&program);
+    assert!(
+        result.is_err(),
+        "fail() inside if branch should produce an error"
     );
 }
 

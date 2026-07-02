@@ -191,7 +191,7 @@ impl Parser {
 
                 self.consume(TokenType::Colon, ParseErrorType::ExpectedTypeColon)?;
 
-                let typing = self.consume(TokenType::Identifier, ParseErrorType::ExpectedType)?;
+                let typing = self.parse_type_name()?;
 
                 parameters.push(FunctionParameter::new(
                     mutability,
@@ -214,9 +214,8 @@ impl Parser {
         // Determine the type
         let mut return_typing = None;
         if self.try_consume(&[TokenType::Arrow]).is_some() {
-            // Should have an identifier
-            return_typing =
-                Some(self.consume(TokenType::Identifier, ParseErrorType::ExpectedType)?);
+            // Should have a type name, possibly with generic parameters
+            return_typing = Some(self.parse_type_name()?);
         }
 
         self.consume(TokenType::LeftBrace, ParseErrorType::ExpectedBlock)?;
@@ -796,8 +795,11 @@ impl Parser {
             TokenType::GreaterEqual => BinaryOp::GreaterEqual,
             TokenType::Less => BinaryOp::Less,
             TokenType::LessEqual => BinaryOp::LessEqual,
-            TokenType::BinaryAnd => todo!(),
-            TokenType::BinaryOr => todo!(),
+            TokenType::BinaryAnd => BinaryOp::And,
+            TokenType::BinaryOr => BinaryOp::Or,
+            TokenType::BinaryXor => BinaryOp::Xor,
+            TokenType::BinaryShiftLeft => BinaryOp::ShiftLeft,
+            TokenType::BinaryShiftRight => BinaryOp::ShiftRight,
             TokenType::DotDot => BinaryOp::Range(false),
             TokenType::DotDotEqual => BinaryOp::Range(true),
             token => {
@@ -824,6 +826,9 @@ impl Parser {
             TokenType::StarEqual => AssignmentOp::MultiplyEqual,
             TokenType::SlashEqual => AssignmentOp::DivideEqual,
             TokenType::PercentEqual => AssignmentOp::RemainderEqual,
+            TokenType::BinaryAndEqual => AssignmentOp::AndEqual,
+            TokenType::BinaryOrEqual => AssignmentOp::OrEqual,
+            TokenType::BinaryXorEqual => AssignmentOp::XorEqual,
             token => {
                 self.error(ParseErrorType::InvalidOperator(token));
                 return None;
@@ -897,9 +902,66 @@ impl Parser {
     }
 
     fn variable(&mut self) -> Option<Expr> {
-        let token = self.last()?;
-        match token.token_type {
-            TokenType::Identifier => Some(Expr::Variable(token.location, token.lexeme.clone())),
+        let location = self.last()?.location;
+        let lexeme = self.last()?.lexeme.clone();
+        let token_type = self.last()?.token_type;
+
+        match token_type {
+            TokenType::Identifier => {
+                let mut result = lexeme.clone();
+                // Only consume generic parameters after known type constructor names
+                let is_type_name = matches!(lexeme.as_str(), "Vec" | "Option" | "Range");
+                while is_type_name && self.peek().is_some_and(|t| t.token_type == TokenType::Less) {
+                    let _ = self.advance(); // consume '<'
+                    let mut depth: i32 = 1;
+                    result.push('<');
+                    loop {
+                        let Some(next) = self.advance() else {
+                            break;
+                        };
+                        match next.token_type {
+                            TokenType::Identifier => {
+                                result.push_str(&next.lexeme);
+                            }
+                            TokenType::Comma => {
+                                result.push(',');
+                            }
+                            TokenType::Less => {
+                                depth += 1;
+                                result.push('<');
+                            }
+                            TokenType::Greater => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    result.push('>');
+                                    break;
+                                } else {
+                                    result.push('>');
+                                }
+                            }
+                            TokenType::BinaryShiftRight => {
+                                // >> tokenized as a single BinaryShiftRight, but can represents two closing angle brackets
+                                depth -= 2;
+                                if depth < 0 {
+                                    result.push_str(">>");
+                                    break;
+                                } else if depth == 0 {
+                                    result.push_str(">>");
+                                    break;
+                                } else {
+                                    // Still have open generics after this >>, push two > chars
+                                    result.push_str(">>");
+                                }
+                            }
+                            _ => {
+                                // Unexpected token in generic context, stop consuming
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Expr::Variable(location, result))
+            }
             a => unreachable!("{a:?}"),
         }
     }
@@ -1000,8 +1062,65 @@ impl Parser {
         self.tokens.get(self.current)
     }
 
-    fn peek_next(&self) -> Option<&Token> {
-        self.tokens.get(self.current + 1)
+    /// Parse a type name, including generic parameters like Vec<i64>.
+    /// Returns a single Token with the full parameterized lexeme.
+    fn parse_type_name(&mut self) -> Option<Token> {
+        let base = self.consume(TokenType::Identifier, ParseErrorType::ExpectedType)?;
+        let mut lexeme = base.lexeme.clone();
+
+        // Check if next token is '<' for generic type parameters
+        while self.peek().is_some_and(|t| t.token_type == TokenType::Less) {
+            let _ = self.advance(); // consume '<'
+            let mut depth: i32 = 1;
+            lexeme.push('<');
+            loop {
+                let Some(next) = self.advance() else {
+                    break;
+                };
+                match next.token_type {
+                    TokenType::Identifier => {
+                        lexeme.push_str(&next.lexeme);
+                    }
+                    TokenType::Comma => {
+                        lexeme.push(',');
+                    }
+                    TokenType::Less => {
+                        depth += 1;
+                        lexeme.push('<');
+                    }
+                    TokenType::Greater => {
+                        depth -= 1;
+                        if depth == 0 {
+                            lexeme.push('>');
+                            break;
+                        } else {
+                            lexeme.push('>');
+                        }
+                    }
+                    TokenType::BinaryShiftRight => {
+                        // >> in source is tokenized as a single BinaryShiftRight,
+                        // but in generic context it represents two closing angle brackets
+                        depth -= 2;
+                        if depth < 0 {
+                            lexeme.push_str(">>");
+                            break;
+                        } else if depth == 0 {
+                            lexeme.push_str(">>");
+                            break;
+                        } else {
+                            // Still have open generics after this >>, push two > chars
+                            lexeme.push_str(">>");
+                        }
+                    }
+                    _ => {
+                        // Unexpected token in generic context, stop consuming
+                        break;
+                    }
+                }
+            }
+        }
+
+        Some(Token::new(base.location, TokenType::Identifier, &lexeme))
     }
 
     pub fn errors(&self) -> &[ParseError] {
@@ -1049,6 +1168,9 @@ pub enum AssignmentOp {
     MultiplyEqual,
     DivideEqual,
     RemainderEqual,
+    AndEqual,
+    OrEqual,
+    XorEqual,
 }
 
 impl AssignmentOp {
@@ -1060,7 +1182,17 @@ impl AssignmentOp {
             AssignmentOp::MultiplyEqual => "*",
             AssignmentOp::DivideEqual => "/",
             AssignmentOp::RemainderEqual => "%",
+            AssignmentOp::AndEqual => "&",
+            AssignmentOp::OrEqual => "|",
+            AssignmentOp::XorEqual => "^",
         }
+    }
+
+    pub fn is_bitwise(&self) -> bool {
+        matches!(
+            self,
+            AssignmentOp::AndEqual | AssignmentOp::OrEqual | AssignmentOp::XorEqual
+        )
     }
 }
 
@@ -1073,6 +1205,9 @@ impl std::fmt::Display for AssignmentOp {
             AssignmentOp::MultiplyEqual => write!(f, "*="),
             AssignmentOp::DivideEqual => write!(f, "/="),
             AssignmentOp::RemainderEqual => write!(f, "%="),
+            AssignmentOp::AndEqual => write!(f, "&="),
+            AssignmentOp::OrEqual => write!(f, "|="),
+            AssignmentOp::XorEqual => write!(f, "^="),
         }
     }
 }
@@ -1108,6 +1243,11 @@ pub enum BinaryOp {
     LessEqual,
     EqualEqual,
     BangEqual,
+    And,
+    Or,
+    Xor,
+    ShiftLeft,
+    ShiftRight,
     // .. vs ..=
     Range(bool),
 }
@@ -1126,6 +1266,11 @@ impl std::fmt::Display for BinaryOp {
             BinaryOp::LessEqual => write!(f, "<="),
             BinaryOp::EqualEqual => write!(f, "=="),
             BinaryOp::BangEqual => write!(f, "!="),
+            BinaryOp::And => write!(f, "&"),
+            BinaryOp::Or => write!(f, "|"),
+            BinaryOp::Xor => write!(f, "^"),
+            BinaryOp::ShiftLeft => write!(f, "<<"),
+            BinaryOp::ShiftRight => write!(f, ">>"),
             BinaryOp::Range(inclusive) => write!(f, "{}", if *inclusive { "..=" } else { ".." }),
         }
     }
@@ -1337,7 +1482,10 @@ impl TokenType {
             | TokenType::MinusEqual
             | TokenType::StarEqual
             | TokenType::SlashEqual
-            | TokenType::PercentEqual => (None, Some(Parser::assign), Precedence::AssignTest),
+            | TokenType::PercentEqual
+            | TokenType::BinaryAndEqual
+            | TokenType::BinaryOrEqual
+            | TokenType::BinaryXorEqual => (None, Some(Parser::assign), Precedence::AssignTest),
             TokenType::Semicolon => (None, None, Precedence::None),
             TokenType::LeftBrace => (Some(Parser::block_expression), None, Precedence::None),
             TokenType::RightBrace => (None, None, Precedence::None),
@@ -1365,10 +1513,15 @@ impl TokenType {
             | TokenType::As
             | TokenType::DocComment
             | TokenType::Eof
-            | TokenType::BinaryAnd
-            | TokenType::BinaryOr
             | TokenType::Else
             | TokenType::Mut => (None, None, Precedence::None),
+            TokenType::BinaryAnd => (None, Some(Parser::binary), Precedence::Term),
+            TokenType::BinaryOr | TokenType::BinaryXor => {
+                (None, Some(Parser::binary), Precedence::Factor)
+            }
+            TokenType::BinaryShiftLeft | TokenType::BinaryShiftRight => {
+                (None, Some(Parser::binary), Precedence::Term)
+            }
         })
     }
 }

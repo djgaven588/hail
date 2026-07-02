@@ -28,6 +28,12 @@ mod for_loops;
 #[cfg(test)]
 mod control_flow;
 
+#[cfg(test)]
+mod generics;
+
+#[cfg(test)]
+mod tracking;
+
 use hail::Constructor;
 use hail::Instructor;
 use hail::MemoryImportResolver;
@@ -62,7 +68,7 @@ pub fn try_compile(source: String) -> Result<Program, String> {
         .map_err(|_| format!("Constructor errors for: {}", source))?;
 
     let instructor = Instructor::new(module, resolver, None);
-    Ok(instructor.generate(_astmts, source))
+    Ok(instructor.generate(_astmts, source, vec![]))
 }
 
 pub fn expected_compile(source: String) -> Program {
@@ -79,7 +85,7 @@ pub fn expected_compile(source: String) -> Program {
 
     // Turn to machine code
     let instructor = Instructor::new(module, resolver, None);
-    let program = instructor.generate(astmts, source);
+    let program = instructor.generate(astmts, source, vec![]);
     program
 }
 

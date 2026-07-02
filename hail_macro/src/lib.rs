@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    FnArg, Ident, ItemFn, LitStr, Pat, ReturnType,
+    FnArg, Ident, ItemFn, Pat, ReturnType,
     parse::{Parse, ParseStream},
     parse_macro_input,
     token::Comma,
@@ -10,7 +10,7 @@ use syn::{
 #[derive(Debug)]
 struct HailAttr {
     kind: Option<Ident>,
-    name: Option<LitStr>,
+    name: Option<String>,
 }
 
 impl Parse for HailAttr {
@@ -26,7 +26,8 @@ impl Parse for HailAttr {
         // Optionally consume a comma and string literal
         if input.peek(Comma) {
             input.parse::<Comma>()?;
-            name = Some(input.parse()?);
+            let lit: syn::LitStr = input.parse()?;
+            name = Some(lit.value());
         }
 
         Ok(HailAttr { kind, name })
@@ -69,18 +70,18 @@ impl Parse for HailAttr {
 pub fn hail(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let attributes = parse_macro_input!(attr as HailAttr);
-    let name = &attributes
+    let name = attributes
         .name
-        .unwrap_or_else(|| LitStr::new(&function.sig.ident.to_string(), function.sig.ident.span()));
+        .unwrap_or_else(|| function.sig.ident.to_string());
 
     match attributes.kind {
         Some(kind) => {
             let kind = kind.to_string();
             match kind.as_str() {
-                "method" => generate_method_wrapper(&function, name),
-                "property" => generate_property_wrapper(&function, name),
-                "setter" => generate_setter_wrapper(&function, name),
-                "free" => generate_free_wrapper(&function, name),
+                "method" => generate_method_wrapper(&function, &name),
+                "property" => generate_property_wrapper(&function, &name),
+                "setter" => generate_setter_wrapper(&function, &name),
+                "free" => generate_free_wrapper(&function, &name),
                 val => {
                     return syn::Error::new_spanned(
                         &function.sig.ident,
@@ -91,7 +92,7 @@ pub fn hail(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-        None => generate_free_wrapper(&function, name),
+        None => generate_free_wrapper(&function, &name),
     }
 }
 
@@ -133,6 +134,56 @@ fn build_param_types(params: &[(&syn::Ident, &syn::Type)]) -> proc_macro2::Token
     quote! { vec![#(#types),*] }
 }
 
+fn build_param_names(params: &[(&syn::Ident, &syn::Type)]) -> proc_macro2::TokenStream {
+    let names: Vec<_> = params.iter().map(|(ident, _)| ident.to_string()).collect();
+    let quoted: Vec<_> = names
+        .iter()
+        .map(|s| {
+            let lit = proc_macro2::Literal::string(s);
+            quote! { String::from(#lit) }
+        })
+        .collect();
+    quote! { vec![#(#quoted),*] }
+}
+
+fn build_param_name(ident: &syn::Ident) -> proc_macro2::TokenStream {
+    let lit = proc_macro2::Literal::string(&ident.to_string());
+    quote! { String::from(#lit) }
+}
+
+fn extract_doc_comments(function: &ItemFn) -> Vec<String> {
+    function
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .filter_map(|attr| {
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                    if let syn::Lit::Str(lit_str) = &expr_lit.lit {
+                        return Some(lit_str.value());
+                    }
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+fn build_doc_comments(doc_comments: &[String]) -> proc_macro2::TokenStream {
+    let quoted: Vec<_> = doc_comments
+        .iter()
+        .map(|s| {
+            let lit = proc_macro2::Literal::string(s);
+            quote! { String::from(#lit) }
+        })
+        .collect();
+    if quoted.is_empty() {
+        quote! { vec![] }
+    } else {
+        quote! { vec![#(#quoted),*] }
+    }
+}
+
 /// Build the `return_type` option token for a registration call.
 fn build_return_type(output: &syn::ReturnType) -> proc_macro2::TokenStream {
     match output {
@@ -145,7 +196,7 @@ fn build_return_type(output: &syn::ReturnType) -> proc_macro2::TokenStream {
 }
 
 // Free Functions
-fn generate_free_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
+fn generate_free_wrapper(function: &ItemFn, name: &str) -> TokenStream {
     let original_name = &function.sig.ident;
     let wrapper_name = syn::Ident::new(
         &format!("hail_wrap_{}", original_name),
@@ -179,7 +230,11 @@ fn generate_free_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
 
     let param_names: Vec<_> = params.iter().map(|(ident, _)| ident).collect();
 
+    let doc_comments = extract_doc_comments(function);
+    let doc_comments_reg = build_doc_comments(&doc_comments);
+
     let param_types = build_param_types(&params);
+    let param_names_reg = build_param_names(&params);
     let return_type_reg = build_return_type(return_type_sig);
 
     let reg_name = format_ident!("hail_register_{}", original_name);
@@ -207,7 +262,7 @@ fn generate_free_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
             fn #wrapper_name(
                 executor: &mut Executor,
                 mut args: Vec<Box<dyn ProgramValue>>,
-            ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError> {
+            ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind> {
                 #(#param_extractors)*
                 #call_ending
             }
@@ -215,6 +270,8 @@ fn generate_free_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
             module.register_function(hail::FunctionInfo {
                 name: #name.to_string(),
                 param_types: #param_types,
+                param_names: #param_names_reg,
+                doc_comments: #doc_comments_reg,
                 return_type: #return_type_reg,
                 kind: FunctionKind::Free(#wrapper_name),
             })
@@ -226,7 +283,7 @@ fn generate_free_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
 
 // Methods
 
-fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
+fn generate_method_wrapper(function: &ItemFn, name: &str) -> TokenStream {
     let params = extract_params(function);
 
     if params.is_empty() {
@@ -274,7 +331,11 @@ fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
 
     let param_names: Vec<_> = params.iter().skip(1).map(|(ident, _)| ident).collect();
 
+    let doc_comments = extract_doc_comments(function);
+    let doc_comments_reg = build_doc_comments(&doc_comments);
+
     let param_types = build_param_types(&params);
+    let param_names_reg = build_param_names(&params);
     let return_type_reg = build_return_type(return_type_sig);
 
     let reg_name = format_ident!("hail_register_{}", original_name);
@@ -303,7 +364,7 @@ fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                     executor: &mut Executor,
                     receiver: &mut Box<dyn ProgramValue>,
                     mut args: Vec<Box<dyn ProgramValue>>,
-                ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError> {
+                ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind> {
                     let mut self_val = receiver.as_any_mut()
                         .downcast_mut::<#receiver_unreferenced>()
                         .expect(concat!("Expected receiver type '", stringify!(#receiver_unreferenced), "'"));
@@ -318,6 +379,8 @@ fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                     hail::FunctionInfo {
                         name: #name.to_string(),
                         param_types: #param_types,
+                        param_names: #param_names_reg,
+                        doc_comments: #doc_comments_reg,
                         return_type: #return_type_reg,
                         kind: FunctionKind::MethodMut(#wrapper_name),
                     })
@@ -335,7 +398,7 @@ fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                     executor: &mut Executor,
                     receiver: &Box<dyn ProgramValue>,
                     mut args: Vec<Box<dyn ProgramValue>>,
-                ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError> {
+                ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind> {
                     let mut self_val = receiver
                         .as_ref()
                         .as_any()
@@ -352,6 +415,8 @@ fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                     hail::FunctionInfo {
                         name: #name.to_string(),
                         param_types: #param_types,
+                        param_names: #param_names_reg,
+                        doc_comments: #doc_comments_reg,
                         return_type: #return_type_reg,
                         kind: FunctionKind::Method(#wrapper_name),
                     })
@@ -363,7 +428,7 @@ fn generate_method_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
 }
 
 // Properties
-fn generate_property_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
+fn generate_property_wrapper(function: &ItemFn, name: &str) -> TokenStream {
     let params = extract_params(function);
 
     if params.len() != 1 {
@@ -403,6 +468,9 @@ fn generate_property_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
 
     let return_type_reg = build_return_type(return_type_sig);
 
+    let doc_comments = extract_doc_comments(function);
+    let doc_comments_reg = build_doc_comments(&doc_comments);
+
     let reg_name = format_ident!("hail_register_{}", original_name);
 
     let call_ending = if let ReturnType::Type(_, _) = function.sig.output {
@@ -416,6 +484,7 @@ fn generate_property_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
             Ok(None)
         }
     };
+    let param_name = build_param_name(self_ident);
 
     let generated = quote! {
         // This function name conflicts with parameter names, why?
@@ -427,7 +496,7 @@ fn generate_property_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
             fn #wrapper_name(
                 executor: &mut Executor,
                 receiver: &Box<dyn ProgramValue>,
-            ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError> {
+            ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind> {
                 let mut self_val = receiver
                     .as_ref()
                     .as_any()
@@ -442,6 +511,8 @@ fn generate_property_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                 hail::FunctionInfo {
                     name: #name.to_string(),
                     param_types: vec![hail::ValueType::of::<#receiver_unreferenced>()],
+                    param_names: vec![#param_name],
+                    doc_comments: #doc_comments_reg,
                     return_type: #return_type_reg,
                     kind: FunctionKind::Property(#wrapper_name),
                 })
@@ -452,7 +523,7 @@ fn generate_property_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
 }
 
 // Setters, exactly 2 params (&mut T, T2) where T is receiver and T2 is value to set
-fn generate_setter_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
+fn generate_setter_wrapper(function: &ItemFn, name: &str) -> TokenStream {
     let params = extract_params(function);
 
     // Validate exactly 2 parameters for setter
@@ -479,7 +550,7 @@ fn generate_setter_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
     let receiver_unreferenced: &syn::Type = &receiver_unreferenced.elem;
 
     // Second param is the value type to set
-    let (_value_ident, value_type) = params[1];
+    let (value_ident, value_type) = params[1];
     let value_program_type = rust_type_to_value_type(value_type);
 
     let original_name = &function.sig.ident;
@@ -488,6 +559,9 @@ fn generate_setter_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
         original_name.span(),
     );
 
+    let doc_comments = extract_doc_comments(function);
+    let doc_comments_reg = build_doc_comments(&doc_comments);
+
     // Setters always return nothing (Ok(None))
     let call_ending = quote! {
         #original_name(self_val, value);
@@ -495,6 +569,8 @@ fn generate_setter_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
     };
 
     let reg_name = format_ident!("hail_register_{}", original_name);
+    let receiver_param_name = build_param_name(receiver_ident);
+    let value_param_name = build_param_name(value_ident);
 
     let generated = quote! {
         // This function name conflicts with parameter names, why?
@@ -507,7 +583,7 @@ fn generate_setter_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                 executor: &mut Executor,
                 receiver: &mut Box<dyn ProgramValue>,
                 arg: Box<dyn ProgramValue>,
-            ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError> {
+            ) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind> {
                 let mut self_val = receiver.as_any_mut()
                     .downcast_mut::<#receiver_unreferenced>()
                     .expect(concat!("Expected receiver type '", stringify!(#receiver_unreferenced), "'"));
@@ -525,6 +601,8 @@ fn generate_setter_wrapper(function: &ItemFn, name: &LitStr) -> TokenStream {
                 hail::FunctionInfo {
                     name: #name.to_string(),
                     param_types: vec![hail::ValueType::of::<#receiver_unreferenced>(), #value_program_type],
+                    param_names: vec![#receiver_param_name, #value_param_name],
+                    doc_comments: #doc_comments_reg,
                     return_type: None,
                     kind: FunctionKind::Setter(#wrapper_name),
                 })

@@ -1,0 +1,47 @@
+{
+	"name": "Hail",
+	"scopeName": "source.hail",
+	"patterns": [
+		{
+			"name": "keyword.control.hail",
+			"match": "\\b(let|if|else|while|for|loop|fn|return|break|continue|mut|const|in|as|struct|import)\\b"
+		},
+		{
+			"name": "constant.language.boolean.hail",
+			"match": "\\b(true|false)\\b"
+		},
+		{
+			"name": "storage.type.hail",
+			"match": "\\b(i64|f64|bool|String|Range|Option|Vec)\\b"
+		},
+		{
+			"name": "string.quoted.double.hail",
+			"begin": "\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.hail",
+					"match": "\\\\."
+				}
+			]
+		},
+		{
+			"name": "constant.numeric.integer.hail",
+			"match": "\\b\\d[\\d_]*\\b"
+		},
+		{
+			"name": "constant.numeric.float.hail",
+			"match": "\\b\\d[\\d_]*\\.\\d+\\b"
+		},
+		{
+			"name": "comment.line.double-slash.hail",
+			"match": "//.*$"
+		},
+		{
+			"name": "comment.block.hail",
+			"begin": "/\\*",
+			"end": "\\*/"
+		}
+	],
+	"repository": {}
+}

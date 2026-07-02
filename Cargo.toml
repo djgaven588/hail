@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["hail", "hail_macro", "hail_testing", "hail_std"]
+members = ["hail", "hail_macro", "hail_std", "hail_docs", "hail_testing"]
 
 [profile.profiling]
 inherits = "release"

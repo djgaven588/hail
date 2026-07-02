@@ -1,29 +1,24 @@
-mod benching;
-pub use benching::*;
-mod constructor;
+pub mod constructor;
 pub use constructor::*;
-mod executor;
+pub mod executor;
 pub use executor::*;
-mod instructor;
+pub mod instructor;
 pub use instructor::*;
-mod module;
+pub mod module;
 pub use module::*;
-mod parser;
+pub mod parser;
 pub use parser::*;
-mod scanner;
+pub mod scanner;
 pub use scanner::*;
-mod visualize;
+pub mod visualize;
 pub use visualize::*;
+pub mod memory_usage;
 
-use std::{fmt::Debug, fs, sync::Arc};
+use std::fmt::Debug;
 
-pub fn run(script_name: String, is_bench: bool) {
-    todo!("Bring back as part of ``hail_testing`` or some sort of thing");
+pub fn run(_script_name: String, _is_bench: bool) {
+    todo!("Add back a way to directly run scripts");
 
-    if is_bench {
-        benching::bench(&script_name);
-        return;
-    }
     /*
     let path = "./".to_string() + script_name.as_str() + ".hail";
     println!("Running: {path}");
@@ -99,7 +94,7 @@ pub fn run(script_name: String, is_bench: bool) {
             };
         println!("\nConstruct: \n{astmts:?}\n");
 
-        let program = Instructor::new(module, resolver, None).generate(astmts, source);
+        let program = Instructor::new(module, resolver, None).generate(astmts, source, scanner.get().unwrap().to_vec());
         println!("\nInstructions: \n{program:?}\n");
 
         let result = Executor::default().run_with_return::<i64>(&program);

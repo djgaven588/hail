@@ -33,7 +33,7 @@ fn compile_with_imports(
         .map_err(|e| format!("Constructor errors: {:?}", e))?;
 
     let instructor = Instructor::new(module, resolver, None);
-    Ok(instructor.generate(_astmts, source))
+    Ok(instructor.generate(_astmts, source, vec![]))
 }
 
 /// Helper to compile and run a script with imports, returning typed result
@@ -1360,41 +1360,6 @@ math::sum_to_n(100)
 
     // 1+2+...+100 = 5050
     assert_eq!(result, 5050);
-}
-
-/// Import of a void (unit returning) function, verifying compilation and execution succeed without a return value
-#[test]
-fn import_void_function() {
-    let mut imports = HashMap::new();
-    imports.insert(
-        "print".to_string(),
-        r#"
-fn print_hello() {
-    print("Hello from imported module");
-}
-"#
-        .to_string(),
-    );
-
-    // This should compile and run without error (void function)
-    let result = compile_with_imports(
-        r#"
-import "print" as printer;
-printer::print_hello();
-42
-"#
-        .to_string(),
-        &imports,
-    );
-
-    assert!(result.is_ok());
-
-    if let Ok(program) = result {
-        let executor = Executor::default();
-        let exec_result = executor.run_with_return::<i64>(&program);
-        assert!(exec_result.is_ok());
-        assert_eq!(exec_result.unwrap(), 42);
-    }
 }
 
 /// Import verifying that a function body can reference its own module-level `const` by name

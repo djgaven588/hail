@@ -1,8 +1,0 @@
-let x = add(3, 4);
-print x;
-
-let y = double(10);
-print y;
-
-let z = add(double(5), add(1, 2));
-print z;

@@ -5,13 +5,19 @@ use std::{
 };
 
 use hail::{
-    ExecutorError, FunctionInfo, FunctionKind, Module, ModuleError, ValueType, VecIterator,
+    ExecutorErrorKind, FunctionInfo, FunctionKind, Module, ModuleError, RangeIterator, ValueType,
 };
 use hail_macro::hail;
 
 pub fn std() -> Result<Module, ModuleError> {
     let mut module = Module::default();
 
+    // Custom handling of built-in types.
+    // TODO: Remove these and stop handling built-ins special.
+    module.typing.insert("i64".to_owned(), ValueType::Int);
+    module.typing.insert("f64".to_owned(), ValueType::Float);
+    module.typing.insert("bool".to_owned(), ValueType::Bool);
+    module.typing.insert("String".to_owned(), ValueType::String);
     hail::define_type_wrappers::<i64>(&mut module, ValueType::Int)?;
     hail::define_type_wrappers::<f64>(&mut module, ValueType::Float)?;
     hail::define_type_wrappers::<bool>(&mut module, ValueType::Bool)?;
@@ -38,6 +44,18 @@ pub fn std() -> Result<Module, ModuleError> {
     hail_register_int_not_equal(&mut module)?;
 
     hail_register_int_negate(&mut module)?;
+
+    // Bitwise operators for i64
+    hail_register_int_and(&mut module)?;
+    hail_register_int_or(&mut module)?;
+    hail_register_int_xor(&mut module)?;
+    hail_register_int_shift_left(&mut module)?;
+    hail_register_int_shift_right(&mut module)?;
+
+    hail_register_int_and_equal(&mut module)?;
+    hail_register_int_or_equal(&mut module)?;
+    hail_register_int_xor_equal(&mut module)?;
+
     hail_register_int_abs(&mut module)?;
     hail_register_int_pow(&mut module)?;
     hail_register_int_min(&mut module)?;
@@ -46,6 +64,7 @@ pub fn std() -> Result<Module, ModuleError> {
     hail_register_int_range_inclusive(&mut module)?;
     hail_register_int_range_exclusive(&mut module)?;
     hail_register_int_range_into_iter(&mut module)?;
+    hail_register_int_iter_next(&mut module)?;
 
     hail_register_int_to_float(&mut module)?;
 
@@ -91,7 +110,7 @@ pub fn std() -> Result<Module, ModuleError> {
     hail_register_bool_invert(&mut module)?;
 
     // Strings
-    hail_register_print(&mut module)?;
+    hail_register_float_to_string_digits(&mut module)?;
 
     hail_register_int_to_string(&mut module)?;
     hail_register_float_to_string(&mut module)?;
@@ -111,22 +130,43 @@ pub fn std() -> Result<Module, ModuleError> {
     hail_register_string_contains(&mut module)?;
     hail_register_string_repeat(&mut module)?;
     hail_register_string_substring(&mut module)?;
+    hail_register_string_ends_with(&mut module)?;
+    hail_register_string_find(&mut module)?;
 
     // Helper
     module.register_function(FunctionInfo {
         name: "todo".to_string(),
         param_types: vec![ValueType::String],
+        param_names: vec!["message".to_string()],
+        doc_comments: vec!["Mark that this point in the code is not complete yet.\nCauses a Todo execution error with the provided message.".to_string()],
         return_type: None,
         kind: FunctionKind::Free(|_executor, mut args| {
-            // String in args is the explicit message attached to this failure
             let message = args
                 .pop()
-                .expect("Args should have expect message.")
+                .expect("Args should have todo message.")
                 .into_any()
                 .downcast::<String>()
-                .expect("Expected string arg for expect");
+                .expect("Expected string arg for todo");
 
-            Err(ExecutorError::Todo(*message))
+            Err(ExecutorErrorKind::Todo(*message))
+        }),
+    })?;
+
+    module.register_function(FunctionInfo {
+        name: "fail".to_string(),
+        param_types: vec![ValueType::String],
+        param_names: vec!["message".to_string()],
+        doc_comments: vec!["Cause a Fail execution error with the provided message.".to_string()],
+        return_type: None,
+        kind: FunctionKind::Free(|_executor, mut args| {
+            let message = args
+                .pop()
+                .expect("Args should have fail message.")
+                .into_any()
+                .downcast::<String>()
+                .expect("Expected string arg for fail");
+
+            Err(ExecutorErrorKind::Fail(*message))
         }),
     })?;
 
@@ -256,17 +296,68 @@ fn int_range_inclusive(a: &i64, b: i64) -> Range<i64> {
 }
 
 #[hail(method, "into_iter")]
-fn int_range_into_iter(a: &Range<i64>) -> VecIterator<i64> {
-    VecIterator {
-        index: 0,
-        // TODO: This is stupid, but it's easy. Cope.
-        values: a.clone().into_iter().collect::<Vec<_>>(),
+fn int_range_into_iter(range: &Range<i64>) -> RangeIterator<i64> {
+    RangeIterator {
+        current: range.start,
+        end: range.end,
+    }
+}
+
+/// Get the next value of a integer range iterator
+#[hail(method, "next")]
+fn int_iter_next(iter: &mut RangeIterator<i64>) -> Option<i64> {
+    if iter.current < iter.end {
+        let value = iter.current;
+        iter.current += 1;
+        Some(value)
+    } else {
+        None
     }
 }
 
 #[hail(method, "to_float")]
 fn int_to_float(a: &i64) -> f64 {
     *a as f64
+}
+
+#[hail(method, "&")]
+fn int_and(a: &i64, b: i64) -> i64 {
+    a & b
+}
+
+#[hail(method, "|")]
+fn int_or(a: &i64, b: i64) -> i64 {
+    a | b
+}
+
+#[hail(method, "^")]
+fn int_xor(a: &i64, b: i64) -> i64 {
+    a ^ b
+}
+
+#[hail(method, "<<")]
+fn int_shift_left(a: &i64, b: i64) -> i64 {
+    a << b
+}
+
+#[hail(method, ">>")]
+fn int_shift_right(a: &i64, b: i64) -> i64 {
+    a >> b
+}
+
+#[hail(method, "&=")]
+fn int_and_equal(a: &mut i64, b: i64) {
+    *a &= b;
+}
+
+#[hail(method, "|=")]
+fn int_or_equal(a: &mut i64, b: i64) {
+    *a |= b;
+}
+
+#[hail(method, "^=")]
+fn int_xor_equal(a: &mut i64, b: i64) {
+    *a ^= b;
 }
 
 //
@@ -447,11 +538,6 @@ fn bool_invert(a: &bool) -> bool {
 // == Strings ==
 //
 
-#[hail(free, "print")]
-fn print(a: String) {
-    println!("Hail Print: {a}");
-}
-
 #[hail(method, "to_string")]
 fn int_to_string(a: &i64) -> String {
     a.to_string()
@@ -460,6 +546,32 @@ fn int_to_string(a: &i64) -> String {
 #[hail(method, "to_string")]
 fn float_to_string(a: &f64) -> String {
     a.to_string()
+}
+
+/// Convert the f64 to a string with the given number of decimal ``digits``.
+///
+/// Returns the formatted string.
+#[hail(method, "to_string")]
+pub fn float_to_string_digits(val: &f64, digits: i64) -> String {
+    let d = (digits.max(0)) as usize;
+    if d == 0 {
+        val.floor().to_string()
+    } else {
+        let multiplier = 10f64.powi(d as i32);
+        let rounded = (val * multiplier).round() / multiplier;
+        let s = format!("{:.}", rounded);
+        if s.contains('.') {
+            let parts: Vec<String> = s.split('.').map(|p| p.to_string()).collect();
+            let mut decimals = parts[1].clone();
+            while decimals.len() < d {
+                decimals.push('0');
+            }
+            format!("{}.{}", parts[0], decimals)
+        } else {
+            let zeros = "0".repeat(d);
+            format!("{}.{}", s, zeros)
+        }
+    }
 }
 
 #[hail(method, "to_string")]
@@ -534,6 +646,19 @@ fn string_substring(a: &String, start: i64, end: i64) -> String {
     }
 
     a[start..end].to_string()
+}
+
+#[hail(method, "ends_with")]
+fn string_ends_with(a: &String, b: String) -> bool {
+    a.ends_with(&b)
+}
+
+/// Find the first instance of ``substring`` in this string.
+///
+/// Returns an Option<i64> with the index, or None if not found.
+#[hail(method, "find")]
+fn string_find(a: &String, substring: String) -> Option<i64> {
+    a.find(&substring).map(|idx| idx as i64)
 }
 
 // Congrats, you're likely insane from scrolling through this.

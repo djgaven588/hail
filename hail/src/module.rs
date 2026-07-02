@@ -5,7 +5,7 @@ use hashbrown::HashMap;
 use crate::{
     SyncProgramValue,
     constructor::ValueType,
-    executor::{Executor, ExecutorError},
+    executor::{Executor, ExecutorErrorKind},
     instructor::ProgramValue,
     parser::{BinaryOp, UnaryOp},
 };
@@ -21,30 +21,30 @@ pub enum ModuleError {
 pub type FreeFn = fn(
     &mut Executor,
     Vec<Box<dyn ProgramValue>>,
-) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError>;
+) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind>;
 
 pub type MethodFn = fn(
     &mut Executor,
     &Box<dyn ProgramValue>,
     Vec<Box<dyn ProgramValue>>,
-) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError>;
+) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind>;
 
 pub type MethodFnMut = fn(
     &mut Executor,
     &mut Box<dyn ProgramValue>,
     Vec<Box<dyn ProgramValue>>,
-) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError>;
+) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind>;
 
 pub type PropertyFn = fn(
     &mut Executor,
     &Box<dyn ProgramValue>,
-) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError>;
+) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind>;
 
 pub type SetterFn = fn(
     &mut Executor,
     &mut Box<dyn ProgramValue>,
     Box<dyn ProgramValue>,
-) -> Result<Option<Box<dyn ProgramValue>>, ExecutorError>;
+) -> Result<Option<Box<dyn ProgramValue>>, ExecutorErrorKind>;
 
 /// Determines how a function is called from scripts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,8 +77,30 @@ impl FunctionKind {
 pub struct FunctionInfo {
     pub name: String,
     pub param_types: Vec<ValueType>,
+    pub param_names: Vec<String>,
     pub return_type: Option<ValueType>,
     pub kind: FunctionKind,
+    pub doc_comments: Vec<String>,
+}
+
+impl FunctionInfo {
+    pub fn new(
+        name: impl Into<String>,
+        param_names: Vec<String>,
+        param_types: Vec<ValueType>,
+        return_type: Option<ValueType>,
+        kind: FunctionKind,
+        doc_comments: Vec<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            param_types,
+            param_names,
+            return_type,
+            kind,
+            doc_comments,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Clone, Hash, Debug)]
@@ -109,10 +131,10 @@ impl BinarySignature {
 #[derive(Default, Debug)]
 pub struct Module {
     // NOTE: When modifying these fields you need to make sure to add its corresponding module merge!!
-    typing: HashMap<String, ValueType>,
-    globals: HashMap<String, (ValueType, Box<dyn SyncProgramValue>)>,
-    functions: HashMap<String, Vec<FunctionInfo>>,
-    methods: HashMap<(ValueType, String), Vec<FunctionInfo>>,
+    pub typing: HashMap<String, ValueType>,
+    pub globals: HashMap<String, (ValueType, Box<dyn SyncProgramValue>)>,
+    pub functions: HashMap<String, Vec<FunctionInfo>>,
+    pub methods: HashMap<(ValueType, String), Vec<FunctionInfo>>,
 }
 
 impl Module {
@@ -388,6 +410,8 @@ fn define_option_wrap<T: ProgramValue + Clone>(
     module.register_function(FunctionInfo {
         name: option_type_name.clone(),
         param_types: vec![],
+        param_names: vec![],
+        doc_comments: vec![format!("Create a None of type {option_type_name}.")],
         return_type: Some(option_value_type.clone()),
         kind: FunctionKind::Free(|_executor, _args| {
             let option: Option<T> = None;
@@ -399,6 +423,8 @@ fn define_option_wrap<T: ProgramValue + Clone>(
     module.register_function(FunctionInfo {
         name: "Some".to_string(),
         param_types: vec![typing.clone()],
+        param_names: vec!["value".to_string()],
+        doc_comments: vec![format!("Create a Some of type {option_type_name}.")],
         return_type: Some(option_value_type.clone()),
         kind: FunctionKind::Free(|_executor, mut args| {
             let callee = args
@@ -418,6 +444,10 @@ fn define_option_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "unwrap".to_string(),
             param_types: vec![option_value_type.clone()],
+            param_names: vec!["value".to_string()],
+            doc_comments: vec![format!(
+                "Get the Some value of this {option_value_type}, erroring if None."
+            )],
             return_type: Some(typing.clone()),
             kind: FunctionKind::Method(|_executor, callee, _args| {
                 let callee = callee
@@ -429,7 +459,7 @@ fn define_option_wrap<T: ProgramValue + Clone>(
                 if let Some(callee) = callee {
                     Ok(Some(Box::new(callee.clone())))
                 } else {
-                    Err(ExecutorError::UnwrapFailed)
+                    Err(ExecutorErrorKind::UnwrapFailed)
                 }
             }),
         },
@@ -441,6 +471,10 @@ fn define_option_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "expect".to_string(),
             param_types: vec![option_value_type.clone(), ValueType::String],
+            param_names: vec!["value".to_string()],
+            doc_comments: vec![format!(
+                "Get the Some value of this {option_value_type}, with a custom error if None."
+            )],
             return_type: Some(typing.clone()),
             kind: FunctionKind::Method(|_executor, callee, mut args| {
                 let callee = callee
@@ -459,7 +493,7 @@ fn define_option_wrap<T: ProgramValue + Clone>(
                         .into_any()
                         .downcast::<String>()
                         .expect("Expected string arg for expect");
-                    Err(ExecutorError::ExpectFailed(*message))
+                    Err(ExecutorErrorKind::ExpectFailed(*message))
                 }
             }),
         },
@@ -471,6 +505,10 @@ fn define_option_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "is_some".to_string(),
             param_types: vec![option_value_type.clone()],
+            param_names: vec!["value".to_string()],
+            doc_comments: vec![format!(
+                "Find out if this {option_value_type} contains a Some."
+            )],
             return_type: Some(ValueType::Bool),
             kind: FunctionKind::Method(|_executor, callee, _args| {
                 let callee = callee
@@ -489,6 +527,10 @@ fn define_option_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "is_none".to_string(),
             param_types: vec![option_value_type.clone()],
+            param_names: vec!["value".to_string()],
+            doc_comments: vec![format!(
+                "Find out if this {option_value_type} contains a None."
+            )],
             return_type: Some(ValueType::Bool),
             kind: FunctionKind::Method(|_executor, callee, _args| {
                 let callee = callee
@@ -522,6 +564,8 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
     module.register_function(FunctionInfo {
         name: vec_type_name.clone(),
         param_types: vec![],
+        param_names: vec![],
+        doc_comments: vec![format!("Create a new {vec_type_name}.")],
         return_type: Some(vec_value_type.clone()),
         kind: FunctionKind::Free(|_executor, _args| {
             let vec: Vec<T> = Vec::new();
@@ -535,6 +579,10 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "push".to_string(),
             param_types: vec![vec_value_type.clone(), typing.clone()],
+            param_names: vec!["vec".to_string(), "value".to_string()],
+            doc_comments: vec![format!(
+                "Push a {typing_name} entry to the end of the {vec_type_name}."
+            )],
             return_type: None,
             kind: FunctionKind::MethodMut(|_executor, callee, mut args| {
                 let callee = callee
@@ -559,6 +607,17 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "insert".to_string(),
             param_types: vec![vec_value_type.clone(), ValueType::Int, typing.clone()],
+            param_names: vec![
+                "vec".to_string(),
+                "position".to_string(),
+                "value".to_string(),
+            ],
+            doc_comments: vec![
+                format!(
+                    "Insert a {typing_name} entry at the specified position within {vec_type_name}."
+                ),
+                "Note: Indices must be <= vec.len().".to_string(),
+            ],
             return_type: None,
             kind: FunctionKind::MethodMut(|_executor, callee, mut args| {
                 let callee = callee
@@ -579,9 +638,9 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
                     .expect("Push arg for downcast isn't T");
 
                 if index < 0 {
-                    return Err(ExecutorError::NegativeIndex(index));
+                    return Err(ExecutorErrorKind::NegativeIndex(index));
                 } else if index > callee.len() as i64 {
-                    return Err(ExecutorError::IndexOutOfRange(index));
+                    return Err(ExecutorErrorKind::IndexOutOfRange(index, callee.len()));
                 }
 
                 callee.insert(index as usize, *entry);
@@ -597,6 +656,10 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "pop".to_string(),
             param_types: vec![vec_value_type.clone()],
+            param_names: vec!["vec".to_string()],
+            doc_comments: vec![format!(
+                "Take a {typing_name} off the end of the {vec_type_name} if one is available."
+            )],
             return_type: Some(typing_value_optional.clone()),
             kind: FunctionKind::MethodMut(|_executor, callee, _args| {
                 let callee = callee
@@ -616,6 +679,10 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "remove".to_string(),
             param_types: vec![vec_value_type.clone(), ValueType::Int],
+            param_names: vec!["vec".to_string(), "position".to_string()],
+            doc_comments: vec![format!(
+                "Remove a {typing_name} entry at the specified position within {vec_type_name}."
+            )],
             return_type: None,
             kind: FunctionKind::MethodMut(|_executor, callee, mut args| {
                 let callee = callee
@@ -631,9 +698,9 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
                     .expect("Index arg for downcast isn't Int");
 
                 if index < 0 {
-                    return Err(ExecutorError::NegativeIndex(index));
+                    return Err(ExecutorErrorKind::NegativeIndex(index));
                 } else if index >= callee.len() as i64 {
-                    return Err(ExecutorError::IndexOutOfRange(index));
+                    return Err(ExecutorErrorKind::IndexOutOfRange(index, callee.len()));
                 }
 
                 callee.remove(index as usize);
@@ -649,6 +716,8 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "get".to_string(),
             param_types: vec![vec_value_type.clone(), ValueType::Int],
+            param_names: vec!["vec".to_string(), "position".to_string()],
+            doc_comments: vec![format!("Get the {typing_name} entry at the specified position within {vec_type_name} if it exists.")],
             return_type: Some(typing_value_optional),
             kind: FunctionKind::Method(|_executor, callee, mut args| {
                 let callee = callee
@@ -664,7 +733,7 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
                     .expect("Index arg for downcast isn't Int");
 
                 if entry < 0 {
-                    return Err(ExecutorError::NegativeIndex(entry));
+                    return Err(ExecutorErrorKind::NegativeIndex(entry));
                 }
 
                 let value = callee.get(entry as usize).cloned();
@@ -679,6 +748,8 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "index".to_string(),
             param_types: vec![vec_value_type.clone(), ValueType::Int],
+            param_names: vec!["vec".to_string(), "position".to_string()],
+            doc_comments: vec![format!("Get the {typing_name} entry at the specified position within {vec_type_name}, erroring if it doesn't exists.")],
             return_type: Some(typing.clone()),
             kind: FunctionKind::Method(|_executor, callee, mut args| {
                 let callee = callee
@@ -694,13 +765,13 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
                     .expect("Index arg for downcast isn't Int");
 
                 if entry < 0 {
-                    return Err(ExecutorError::NegativeIndex(entry));
+                    return Err(ExecutorErrorKind::NegativeIndex(entry));
                 }
 
                 let value = callee.get(entry as usize).cloned();
 
                 let Some(value) = value else {
-                    return Err(ExecutorError::IndexOutOfRange(entry));
+                    return Err(ExecutorErrorKind::IndexOutOfRange(entry, callee.len()));
                 };
 
                 Ok(Some(Box::new(value)))
@@ -715,6 +786,14 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "set".to_string(),
             param_types: vec![vec_value_type.clone(), ValueType::Int, typing.clone()],
+            param_names: vec![
+                "vec".to_string(),
+                "position".to_string(),
+                "value".to_string(),
+            ],
+            doc_comments: vec![format!(
+                "Set the {typing_name} entry at the specified position within {vec_type_name}."
+            )],
             return_type: None,
             kind: FunctionKind::MethodMut(|_executor, callee, mut args| {
                 let callee = callee
@@ -737,12 +816,12 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
                     .expect("Value arg for set downcast isn't T");
 
                 if entry < 0 {
-                    return Err(ExecutorError::NegativeIndex(entry));
+                    return Err(ExecutorErrorKind::NegativeIndex(entry));
                 }
 
                 let idx = entry as usize;
                 if idx >= callee.len() {
-                    return Err(ExecutorError::IndexOutOfRange(entry));
+                    return Err(ExecutorErrorKind::IndexOutOfRange(entry, callee.len()));
                 }
 
                 callee[idx] = *value;
@@ -756,6 +835,8 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "is_empty".to_string(),
             param_types: vec![vec_value_type.clone()],
+            param_names: vec!["vec".to_string()],
+            doc_comments: vec![format!("Check if the {vec_type_name} is empty.")],
             return_type: Some(ValueType::Bool),
             kind: FunctionKind::Method(|_executor, callee, _args| {
                 let callee = callee
@@ -774,6 +855,8 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "len".to_string(),
             param_types: vec![vec_value_type.clone()],
+            param_names: vec!["vec".to_string()],
+            doc_comments: vec![format!("Get the element count of the {vec_type_name}.")],
             return_type: Some(ValueType::Int),
             kind: FunctionKind::Method(|_executor, callee, _args| {
                 let callee = callee
@@ -793,6 +876,8 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "into_iter".to_string(),
             param_types: vec![vec_value_type.clone()],
+            param_names: vec!["vec".to_string()],
+            doc_comments: vec![format!("Convert this {vec_type_name} into an iterator.")],
             return_type: Some(iterator_type.clone()),
             kind: FunctionKind::Method(|_executor, callee, _args| {
                 let callee = callee
@@ -814,6 +899,10 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
         FunctionInfo {
             name: "next".to_string(),
             param_types: vec![iterator_type.clone()],
+            param_names: vec!["vec".to_string()],
+            doc_comments: vec![format!(
+                "Get the next {typing_name} of the {iterator_type} if it exists."
+            )],
             return_type: Some(ValueType::of::<Option<T>>()),
             kind: FunctionKind::MethodMut(|_executor, callee, _args| {
                 let callee = callee
@@ -839,7 +928,13 @@ fn define_vector_wrap<T: ProgramValue + Clone>(
 }
 
 #[derive(Clone)]
-pub struct VecIterator<T: ProgramValue> {
+pub struct VecIterator<T> {
     pub index: usize,
     pub values: Vec<T>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RangeIterator<T> {
+    pub current: T,
+    pub end: T,
 }

@@ -10,6 +10,12 @@ struct Counter {
     value: i64,
 }
 
+impl hail::memory_usage::MemoryUsage for Counter {
+    fn memory_usage(&self) -> usize {
+        unimplemented!()
+    }
+}
+
 impl Counter {
     fn new() -> Self {
         Counter { value: 0 }
@@ -27,6 +33,12 @@ impl Counter {
 struct Point2D {
     x: i64,
     y: i64,
+}
+
+impl hail::memory_usage::MemoryUsage for Point2D {
+    fn memory_usage(&self) -> usize {
+        unimplemented!()
+    }
 }
 
 impl Point2D {
@@ -64,6 +76,8 @@ fn setter_module() -> Arc<Module> {
         .register_function(FunctionInfo {
             name: "make_counter".to_string(),
             param_types: vec![],
+            param_names: vec![],
+            doc_comments: vec![],
             return_type: Some(hail::ValueType::of::<Counter>()),
             kind: FunctionKind::Free(|_exec, _args| Ok(Some(Box::new(Counter::new())))),
         })
@@ -76,6 +90,8 @@ fn setter_module() -> Arc<Module> {
             FunctionInfo {
                 name: "value".to_string(),
                 param_types: vec![hail::ValueType::of::<Counter>()],
+                param_names: vec!["counter".to_string()],
+                doc_comments: vec![],
                 return_type: Some(hail::ValueType::Int),
                 kind: FunctionKind::Property(|_exec, callee| {
                     let c = callee
@@ -95,6 +111,8 @@ fn setter_module() -> Arc<Module> {
             FunctionInfo {
                 name: "value".to_string(),
                 param_types: vec![hail::ValueType::of::<Counter>(), hail::ValueType::Int],
+                param_names: vec!["counter".to_string(), "value".to_string()],
+                doc_comments: vec![],
                 return_type: None,
                 kind: FunctionKind::Setter(|_exec, callee, arg| {
                     let c = callee
@@ -117,6 +135,8 @@ fn setter_module() -> Arc<Module> {
         .register_function(FunctionInfo {
             name: "make_point".to_string(),
             param_types: vec![],
+            param_names: vec![],
+            doc_comments: vec![],
             return_type: Some(hail::ValueType::of::<Point2D>()),
             kind: FunctionKind::Free(|_exec, _args| Ok(Some(Box::new(Point2D::new())))),
         })
@@ -129,6 +149,8 @@ fn setter_module() -> Arc<Module> {
             FunctionInfo {
                 name: "x".to_string(),
                 param_types: vec![hail::ValueType::of::<Point2D>()],
+                param_names: vec!["point".to_string()],
+                doc_comments: vec![],
                 return_type: Some(hail::ValueType::Int),
                 kind: FunctionKind::Property(|_exec, callee| {
                     let p = callee
@@ -148,6 +170,8 @@ fn setter_module() -> Arc<Module> {
             FunctionInfo {
                 name: "x".to_string(),
                 param_types: vec![hail::ValueType::of::<Point2D>(), hail::ValueType::Int],
+                param_names: vec!["point".to_string(), "x".to_string()],
+                doc_comments: vec![],
                 return_type: None,
                 kind: FunctionKind::Setter(|_exec, callee, arg| {
                     let p = callee
@@ -172,6 +196,8 @@ fn setter_module() -> Arc<Module> {
             FunctionInfo {
                 name: "y".to_string(),
                 param_types: vec![hail::ValueType::of::<Point2D>()],
+                param_names: vec!["counter".to_string()],
+                doc_comments: vec![],
                 return_type: Some(hail::ValueType::Int),
                 kind: FunctionKind::Property(|_exec, callee| {
                     let p = callee
@@ -191,6 +217,8 @@ fn setter_module() -> Arc<Module> {
             FunctionInfo {
                 name: "y".to_string(),
                 param_types: vec![hail::ValueType::of::<Point2D>(), hail::ValueType::Int],
+                param_names: vec!["counter".to_string(), "y".to_string()],
+                doc_comments: vec![],
                 return_type: None,
                 kind: FunctionKind::Setter(|_exec, callee, arg| {
                     let p = callee
@@ -221,7 +249,7 @@ fn compile_with_setters(source: String) -> hail::Program {
         .generate(&stmts)
         .expect("Should be able to construct");
     let instructor = Instructor::new(module, resolver, None);
-    instructor.generate(astmts, source)
+    instructor.generate(astmts, source, vec![])
 }
 
 /// Attempt to compile a script against the setter module, returning Err if any pipeline stage fails.
@@ -245,7 +273,7 @@ fn try_compile_with_setters(source: String) -> Result<hail::Program, String> {
         .generate(stmts)
         .map_err(|_| format!("Constructor errors for: {}", source))?;
     let instructor = Instructor::new(module, resolver, None);
-    Ok(instructor.generate(astmts, source))
+    Ok(instructor.generate(astmts, source, vec![]))
 }
 
 /// Test basic setter: obj.field = value (e.g., `point.x = 10`)

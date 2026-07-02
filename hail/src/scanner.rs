@@ -70,9 +70,15 @@ pub enum TokenType {
     Less,
     LessEqual,
     BinaryAnd,
+    BinaryAndEqual,
     And,
     BinaryOr,
+    BinaryOrEqual,
     Or,
+    BinaryXor,
+    BinaryXorEqual,
+    BinaryShiftLeft,
+    BinaryShiftRight,
     PlusEqual,
     MinusEqual,
     StarEqual,
@@ -118,7 +124,11 @@ impl TokenType {
             | TokenType::PlusEqual
             | TokenType::MinusEqual
             | TokenType::StarEqual
-            | TokenType::SlashEqual => true,
+            | TokenType::SlashEqual
+            | TokenType::PercentEqual
+            | TokenType::BinaryAndEqual
+            | TokenType::BinaryOrEqual
+            | TokenType::BinaryXorEqual => true,
             _ => false,
         }
     }
@@ -130,6 +140,10 @@ impl TokenType {
             TokenType::MinusEqual,
             TokenType::StarEqual,
             TokenType::SlashEqual,
+            TokenType::PercentEqual,
+            TokenType::BinaryAndEqual,
+            TokenType::BinaryOrEqual,
+            TokenType::BinaryXorEqual,
         ]
     }
 
@@ -140,6 +154,10 @@ impl TokenType {
             TokenType::MinusEqual => AssignmentOp::MinusEqual,
             TokenType::StarEqual => AssignmentOp::MultiplyEqual,
             TokenType::SlashEqual => AssignmentOp::DivideEqual,
+            TokenType::PercentEqual => AssignmentOp::RemainderEqual,
+            TokenType::BinaryAndEqual => AssignmentOp::AndEqual,
+            TokenType::BinaryOrEqual => AssignmentOp::OrEqual,
+            TokenType::BinaryXorEqual => AssignmentOp::XorEqual,
             a => unreachable!("{a:?}"),
         }
     }
@@ -265,6 +283,8 @@ impl Scanner {
             '<' => {
                 if self.try_match('=') {
                     self.push_token(TokenType::LessEqual);
+                } else if self.try_match('<') {
+                    self.push_token(TokenType::BinaryShiftLeft);
                 } else {
                     self.push_token(TokenType::Less);
                 }
@@ -272,6 +292,8 @@ impl Scanner {
             '>' => {
                 if self.try_match('=') {
                     self.push_token(TokenType::GreaterEqual);
+                } else if self.try_match('>') {
+                    self.push_token(TokenType::BinaryShiftRight);
                 } else {
                     self.push_token(TokenType::Greater);
                 }
@@ -279,6 +301,8 @@ impl Scanner {
             '&' => {
                 if self.try_match('&') {
                     self.push_token(TokenType::And);
+                } else if self.try_match('=') {
+                    self.push_token(TokenType::BinaryAndEqual);
                 } else {
                     self.push_token(TokenType::BinaryAnd);
                 }
@@ -286,8 +310,17 @@ impl Scanner {
             '|' => {
                 if self.try_match('|') {
                     self.push_token(TokenType::Or);
+                } else if self.try_match('=') {
+                    self.push_token(TokenType::BinaryOrEqual);
                 } else {
                     self.push_token(TokenType::BinaryOr);
+                }
+            }
+            '^' => {
+                if self.try_match('=') {
+                    self.push_token(TokenType::BinaryXorEqual);
+                } else {
+                    self.push_token(TokenType::BinaryXor);
                 }
             }
             '"' => {
@@ -346,6 +379,10 @@ impl Scanner {
                     'n' => {
                         // Build string
                         final_string.push('\n');
+                    }
+                    't' => {
+                        // Tag
+                        final_string.push('\t');
                     }
                     '\\' | '"' => {
                         final_string.push(next);

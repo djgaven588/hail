@@ -1,6 +1,0 @@
-let mut x = 5;
-
-while x > 0 {
-	// This variable should cause a type check error
-	x = 0.0;
-}

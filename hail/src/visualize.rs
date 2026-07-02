@@ -182,7 +182,13 @@ fn color_token(token: &Token) -> AnsiColor {
         | TokenType::And
         | TokenType::Or
         | TokenType::BinaryAnd
+        | TokenType::BinaryAndEqual
         | TokenType::BinaryOr
+        | TokenType::BinaryOrEqual
+        | TokenType::BinaryXor
+        | TokenType::BinaryXorEqual
+        | TokenType::BinaryShiftLeft
+        | TokenType::BinaryShiftRight
         | TokenType::Arrow
         | TokenType::SlashEqual
         | TokenType::PlusEqual

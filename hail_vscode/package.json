@@ -1,0 +1,70 @@
+{
+	"name": "hail",
+	"displayName": "Hail Language Support",
+	"description": "Language server protocol support for the Hail programming language",
+	"version": "0.1.0",
+	"publisher": "Destiny Hailstorm",
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Linters"
+	],
+	"activationEvents": [
+		"onLanguage:hail"
+	],
+	"contributes": {
+		"languages": [
+			{
+				"id": "hail",
+				"aliases": [
+					"Hail",
+					"hail"
+				],
+				"extensions": [
+					".hail"
+				],
+				"mimetypes": [
+					"text/x-hail-source"
+				]
+			}
+		],
+		"configuration": {
+			"type": "object",
+			"title": "Hail",
+			"properties": {
+				"hail.serverPath": {
+					"type": "string",
+					"default": "",
+					"description": "Path to the hail-lsp binary. Likely Voxel Eras' binary."
+				}
+			}
+		},
+		"grammars": [
+			{
+				"language": "hail",
+				"scopeName": "source.hail",
+				"path": "./syntaxes/hail.tmLanguage.json"
+			}
+		]
+	},
+	"main": "./dist/extension.js",
+	"scripts": {
+		"vscode:publish": "vsce publish",
+		"vscode:package": "vsce package",
+		"vscode:lint": "eslint src",
+		"pretest": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/vscode": "^1.80.0",
+		"@types/node": "^20.x",
+		"typescript": "^5.4.0",
+		"@vscode/vsce": "^2.26.0"
+	},
+	"dependencies": {
+		"vscode-languageclient": "^9.0.1"
+	}
+}

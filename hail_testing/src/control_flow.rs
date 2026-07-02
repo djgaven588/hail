@@ -77,7 +77,7 @@ fn continue_statement() {
 #[test]
 fn if_else_early_return_type_merge() {
     let program = expected_compile(
-        "let x = true; let result = if x { 42 } else { print(\"missing\"); return; }; result"
+        "let x = true; let result = if x { 42 } else { fail(\"missing\"); return; }; result"
             .to_owned(),
     );
     let executor = Executor::default();
@@ -92,8 +92,7 @@ fn if_else_early_return_type_merge() {
 #[test]
 fn if_else_early_return_type_merge_reverse() {
     let program = expected_compile(
-        "let x = false; let result = if x { print(\"found\"); return; } else { 99 }; result"
-            .to_owned(),
+        "let x = false; let result = if x { return; } else { 99 }; result".to_owned(),
     );
     let executor = Executor::default();
     let result = executor
@@ -107,8 +106,7 @@ fn if_else_early_return_type_merge_reverse() {
 #[test]
 fn if_else_early_return_both_branches() {
     let program = expected_compile(
-        "let x = false; if x { print(\"found\"); return 0; } else { print(\"missing\"); return 0; }; 42"
-            .to_owned(),
+        "let x = false; if x { return 0; } else { fail(\"missing\"); return 0; }; 42".to_owned(),
     );
     let executor = Executor::default();
     // Both branches return, so the function exits early with NoReturnValue.
@@ -121,7 +119,7 @@ fn if_else_early_return_both_branches() {
 #[test]
 fn if_else_early_return_expression_value() {
     let program = expected_compile(
-        "let x = true; let result = if x { 100 } else { print(\"missing\"); return; }; result"
+        "let x = true; let result = if x { 100 } else { fail(\"missing\"); return; }; result"
             .to_owned(),
     );
     let executor = Executor::default();
@@ -164,7 +162,7 @@ fn nested_else_if_with_return_branch_true_path() {
 #[test]
 fn if_else_block_partial_exit() {
     let program = expected_compile(
-        "let x = true; let mut result = \"\"; if x { result = \"yes\"; } else { print(\"no\"); return; }; result"
+        "let x = true; let mut result = \"\"; if x { result = \"yes\"; } else { fail(\"no\"); return; }; result"
             .to_owned(),
     );
     let executor = Executor::default();
@@ -178,7 +176,7 @@ fn if_else_block_partial_exit() {
 #[test]
 fn if_else_both_strings_one_with_guard() {
     let program = expected_compile(
-        "let x = true; let mut result = \"\"; if x { result = \"yes\"; } else if false { result = \"maybe\"; } else { print(\"no\"); return; }; result"
+        "let x = true; let mut result = \"\"; if x { result = \"yes\"; } else if false { result = \"maybe\"; } else { fail(\"no\"); return; }; result"
             .to_owned(),
     );
     let executor = Executor::default();

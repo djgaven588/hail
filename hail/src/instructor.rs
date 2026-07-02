@@ -5,13 +5,14 @@ use std::{
 };
 
 use crate::{
-    ImportResolver, Location,
+    ImportResolver, Location, Token,
     constructor::{AExpr, AStmt, CallSource, FinalizedConstruct, ValueType, VariableSlot},
+    memory_usage::MemoryUsage,
     module::{FunctionKind, Module},
     parser::LogicalOp,
 };
 
-pub trait ProgramValue: 'static {
+pub trait ProgramValue: MemoryUsage + 'static {
     fn clone_box(&self) -> Box<dyn ProgramValue>;
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
     fn as_any(&self) -> &dyn Any;
@@ -25,7 +26,7 @@ impl Debug for dyn ProgramValue {
     }
 }
 
-impl<T: Clone + 'static> ProgramValue for T {
+impl<T: MemoryUsage + Clone + 'static> ProgramValue for T {
     /// Clone a program value
     /// NOTE: As this is usually wrapped in a box, it needs to have an .as_ref() to get inside right for typing
     fn clone_box(&self) -> Box<dyn ProgramValue> {
@@ -49,7 +50,7 @@ impl<T: Clone + 'static> ProgramValue for T {
     }
 }
 
-pub trait SyncProgramValue: ProgramValue + 'static + Sync + Send {
+pub trait SyncProgramValue: ProgramValue + Sync + Send {
     fn clone_sync_box(&self) -> Box<dyn SyncProgramValue>;
 }
 
@@ -59,7 +60,7 @@ impl Debug for dyn SyncProgramValue {
     }
 }
 
-impl<T: Clone + 'static + Send + Sync> SyncProgramValue for T {
+impl<T: MemoryUsage + Clone + 'static + Send + Sync> SyncProgramValue for T {
     /// Clone a program value
     /// NOTE: As this is usually wrapped in a box, it needs to have an .as_ref() to get inside right for typing
     fn clone_sync_box(&self) -> Box<dyn SyncProgramValue> {
@@ -70,6 +71,7 @@ impl<T: Clone + 'static + Send + Sync> SyncProgramValue for T {
 #[derive(Debug, Clone)]
 pub struct FunctionEntry {
     pub name: String,
+    // TODO: This could be passed across programs and cause arbitrary code execution... Probably.
     pub instruction: usize,
     pub local_count: usize,
     pub params: Vec<ValueType>,
@@ -96,6 +98,7 @@ pub struct Program {
     pub source_path: Option<String>,
     pub script_resolver: Arc<dyn ImportResolver>,
     pub module: Arc<Module>,
+    tokens: Option<Vec<Token>>,
 }
 
 impl Debug for Program {
@@ -108,14 +111,19 @@ impl Debug for Program {
             .field("imports", &self.imports)
             .field("program_source", &self.program_source)
             .field("source_path", &self.source_path)
+            .field("tokens", &self.tokens.as_ref().map(|t| t.len()))
             .finish()
+    }
+}
+
+impl Program {
+    pub fn get_tokens(&self) -> Option<&[Token]> {
+        self.tokens.as_deref()
     }
 }
 
 #[derive(Debug)]
 pub enum Instruction {
-    Print,
-
     // Const
     Constant(Box<dyn SyncProgramValue>),
 
@@ -171,14 +179,21 @@ impl Instructor {
                 source_path,
                 script_resolver: resolver,
                 module,
+                tokens: None,
             },
             pending_jumps: vec![],
         }
     }
 
-    pub fn generate(mut self, construct: FinalizedConstruct, source_code: String) -> Program {
+    pub fn generate(
+        mut self,
+        construct: FinalizedConstruct,
+        source_code: String,
+        tokens: Vec<Token>,
+    ) -> Program {
         self.program.imports = construct.imports;
         self.program.program_source = source_code;
+        self.program.tokens = Some(tokens);
 
         // Emit all function definitions first so every call site can resolve addresses
         for stmt in &construct.stmts {
@@ -202,30 +217,6 @@ impl Instructor {
 
     fn statement(&mut self, stmt: &AStmt) {
         match stmt {
-            AStmt::Print(location, aexpr) => {
-                self.expression(aexpr);
-
-                let value_type = aexpr
-                    .get_value_type()
-                    .expect("Should have return value type")
-                    .value_type();
-                if value_type != ValueType::String {
-                    todo!("UHHHH");
-                    /*
-                    self.push_instruction(
-                        *location,
-                        Instruction::Stringify(
-                            *self
-                                .module
-                                .stringify_ops
-                                .get(&value_type)
-                                .expect("Should have stringify op"),
-                        ),
-                    );*/
-                }
-
-                self.push_instruction(*location, Instruction::Print);
-            }
             AStmt::SetVariable(location, variable_slot, _, aexpr) => {
                 // Push the variable to the stack
                 if let Some(initializer) = aexpr {
@@ -316,8 +307,7 @@ impl Instructor {
 
                 // Get it off the stack if it has a value but it won't be used
                 if aexpr.get_value_type().is_some() && !produces {
-                    //todo!("AAAA");
-                    //self.push_instruction(aexpr.get_location(), Instruction::Drop(1));
+                    self.push_instruction(aexpr.get_location(), Instruction::Drop(1));
                 }
             }
             AStmt::Function(location, name, index, params, body, return_type, local_count) => {

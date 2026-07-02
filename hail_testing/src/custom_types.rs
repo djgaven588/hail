@@ -13,6 +13,12 @@ struct Counter {
     value: i64,
 }
 
+impl hail::memory_usage::MemoryUsage for Counter {
+    fn memory_usage(&self) -> usize {
+        unimplemented!()
+    }
+}
+
 impl Counter {
     fn new(n: i64) -> Self {
         Counter { value: n }
@@ -58,6 +64,8 @@ fn counter_module() -> Module {
         .register_function(FunctionInfo {
             name: "make_counter".to_string(),
             param_types: vec![ValueType::Int],
+            param_names: vec!["value".to_owned()],
+            doc_comments: vec![],
             return_type: Some(ValueType::of::<Counter>()),
             kind: FunctionKind::Free(|_exec, mut args| {
                 let n = *args
@@ -79,6 +87,8 @@ fn counter_module() -> Module {
                 name: "get_value".to_string(),
                 param_types: vec![ValueType::of::<Counter>()],
                 return_type: Some(ValueType::Int),
+                param_names: vec!["counter".to_owned()],
+                doc_comments: vec![],
                 kind: FunctionKind::Property(|_exec, callee| {
                     let c = callee
                         .as_any()
@@ -98,6 +108,8 @@ fn counter_module() -> Module {
                 name: "is_twenty".to_string(),
                 param_types: vec![ValueType::of::<Counter>()],
                 return_type: Some(ValueType::Bool),
+                param_names: vec!["counter".to_owned()],
+                doc_comments: vec![],
                 kind: FunctionKind::Property(|_exec, caller| {
                     let c = caller
                         .as_any()
@@ -117,6 +129,8 @@ fn counter_module() -> Module {
                 name: "add".to_string(),
                 param_types: vec![ValueType::of::<Counter>(), ValueType::Int],
                 return_type: Some(ValueType::Int),
+                param_names: vec!["counter".to_owned(), "value".to_string()],
+                doc_comments: vec![],
                 kind: FunctionKind::MethodMut(|_exec, caller, mut args| {
                     // The executor reverses args so that pop() yields the
                     // receiver first, then each argument left-to-right.
@@ -144,6 +158,12 @@ fn counter_module() -> Module {
                 name: "add_and_multiply".to_string(),
                 param_types: vec![ValueType::of::<Counter>(), ValueType::Int, ValueType::Int],
                 return_type: Some(ValueType::Int),
+                param_names: vec![
+                    "counter".to_owned(),
+                    "added".to_string(),
+                    "multiplied".to_string(),
+                ],
+                doc_comments: vec![],
                 kind: FunctionKind::MethodMut(|_exec, caller, mut args| {
                     // The executor reverses args so that pop() yields the
                     // receiver first, then each argument left-to-right.
@@ -183,7 +203,7 @@ fn compile_with_module(source: String, module: Arc<Module>) -> Program {
         .generate(&stmts)
         .expect("Should be able to construct");
     let instructor = Instructor::new(module, resolver, None);
-    instructor.generate(astmts, source)
+    instructor.generate(astmts, source, vec![])
 }
 
 /// Attempt to compile a script against an arbitrary module, returning `Err` if any pipeline stage fails.
@@ -206,7 +226,7 @@ fn try_compile_with_module(source: String, module: Arc<Module>) -> Result<Progra
         .generate(stmts)
         .map_err(|_| format!("Constructor errors for: {}", source))?;
     let instructor = Instructor::new(module, resolver, None);
-    Ok(instructor.generate(astmts, source))
+    Ok(instructor.generate(astmts, source, vec![]))
 }
 
 // ValueType::of / register_type unit tests
@@ -262,6 +282,12 @@ fn register_type_twice() {
 fn register_different_types() {
     #[derive(Clone)]
     struct Other;
+
+    impl hail::memory_usage::MemoryUsage for Other {
+        fn memory_usage(&self) -> usize {
+            unimplemented!()
+        }
+    }
 
     let mut module = Module::default();
     let vt_counter = module
